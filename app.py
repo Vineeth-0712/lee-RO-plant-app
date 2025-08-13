@@ -1,5 +1,3 @@
-from db import fetchone as _fetchone, fetchall as _fetchall, execute as _execute
-from db import migrate as _migrate
 # =================== LeeWave – RO Plant Calculator Pro (Professional Dashboard) ===================
 import streamlit as st
 import pandas as pd
@@ -8,6 +6,7 @@ from io import BytesIO
 from datetime import datetime
 from pathlib import Path
 import os
+import math
 
 # ---------- Brand ----------
 BRAND = "LeeWave"
@@ -30,12 +29,14 @@ st.markdown(
       .ok    {{ border-left:6px solid #60a5fa; }}
       .bad   {{ border-left:6px solid #ef4444; }}
       .muted {{ color:#6b7280; font-size:12px; }}
+      .note  {{ font-size:13px; color:#374151; line-height:1.35; }}
+      footer {{ visibility:hidden; }}
     </style>
     """,
     unsafe_allow_html=True
 )
 st.markdown(f"<div class='lw-title'>{BRAND} – RO Plant Calculator Pro</div>", unsafe_allow_html=True)
-st.markdown("<div class='lw-sub'>Admin/User • Login • Per-Vessel • Pro KPIs • One-Sheet Excel • PDF • History • Capacity Requests</div>", unsafe_allow_html=True)
+st.markdown("<div class='lw-sub'>Admin/User • Login • Per-Vessel • Pro KPIs • Max Output • One-Sheet Excel • PDF • History • Capacity Requests</div>", unsafe_allow_html=True)
 
 # ---------- Paths ----------
 APP_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -79,8 +80,11 @@ T = {
         "signed":"Signed in","role":"Role","section":"Section","users":"Users","cap_req":"Capacity Requests (pending)",
         "filter_plant":"Filter by Plant Name","filter_site":"Filter by Site","export_hist":"📥 Export History (CSV)",
         "register_ok":"Registered. Please log in.","email_used":"Email already registered.","pwd_mismatch":"Passwords do not match.","need_ep":"Email & password required.","need_en":"Email & new password required.",
-        "pwd_updated":"Password updated. Go to Login.","admin_only":"Admin only."
+        "pwd_updated":"Password updated. Go to Login.","admin_only":"Admin only.",
+        # NEW labels
+        "overall":"Overall Plant Status","notes":"Notes","max_out":"Max Safe Output (LPM)","scaling_risk":"Scaling Risk"
     },
+    # Other languages will fall back to English for new keys (overall/notes/max_out/scaling_risk)
     "ar": {"login":"تسجيل الدخول","register":"تسجيل","forgot":"نسيت كلمة المرور","app":"التطبيق","history":"السجل","admin":"الإدارة","help":"مساعدة",
            "plant_calc":"حاسبة أداء محطة RO","plant_name":"اسم المحطة","site_name":"الموقع","capacity":"السعة (م³/يوم)","temp":"الحرارة (°م)",
            "feed_tds":"TDS التغذية","perm_tds":"TDS المنتج","feed_flow":"تدفق التغذية","perm_flow":"تدفق المنتج","rej_flow":"تدفق الرجيع [اختياري]",
@@ -93,7 +97,7 @@ T = {
            "feed_tds":"ഫീഡ് TDS","perm_tds":"പ്രോഡക്ട് TDS","feed_flow":"ഫീഡ് ഫ്ലോ","perm_flow":"പ്രോഡക്റ്റ് ഫ്ലോ","rej_flow":"റിജക്ട് ഫ്ലോ [ഓപ്ഷണൽ]",
            "hp":"HP ഡിസ്ചാർജ്","brine":"ബ്രൈൻ പ്രഷർ","perm_bp":"പെർമിയേറ്റ് ബാക്ക്‌പ്രഷർ","stage_type":"സ്റ്റേജ് തരം","single":"സിംഗിൾ","two":"ടു സ്റ്റേജ്","three":"ത്രീ സ്റ്റേജ്",
            "s1":"സ്റ്റേജ്-1","s2":"സ്റ്റേജ്-2","s3":"സ്റ്റേജ്-3","results":"ഫലം","status_hdr":"പെർഫോർമൻസ് സ്റ്റാറ്റസ്",
-           "save":"റൺ സേവ് ചെയ്യുക","saved":"സേവ് ചെയ്തു","export_excel":"Excel ഡൗൺലോഡ്","export_pdf":"PDF ഡൗൺലോഡ്",
+           "save":"റൺ സേവ് ചെയ്യുക","saved":"സേവ് ചെയ്തു","export_excel":"Excel ഡൗൺലോഡ്","export_pdf":"PDF ഡೌൺലോഡ്",
            "flags":"ഹെൽത്ത് ഫ്ലാഗ്സ്","ok":"OK","limit_hit":"പരിമിതി എത്തിയിരിക്കുന്നു","req_more":"കപ്പാസിറ്റി കൂട്ടാൻ അഭ്യർത്ഥിക്കൂ","req_label":"പുതിയ ലിമിറ്റ്"},
     "hi": {"login":"लॉगिन","register":"रजिस्टर","forgot":"पासवर्ड भूल गए","app":"ऐप","history":"इतिहास","admin":"एडमिन","help":"सहायता",
            "plant_calc":"RO प्लांट परफॉर्मेंस कैलकुलेटर","plant_name":"प्लांट नाम","site_name":"साइट","capacity":"क्षमता (m³/दिन)","temp":"तापमान (°C)",
@@ -167,9 +171,111 @@ init_db(); migrate_db(); ensure_admin()
 # ---------- Session ----------
 if "page" not in st.session_state: st.session_state.page="auth"
 if "user" not in st.session_state: st.session_state.user=None
-# IMPORTANT: use stable key, not translated text
-if "stage_choice" not in st.session_state: st.session_state.stage_choice="single"
+if "stage_choice" not in st.session_state: st.session_state.stage_choice="single"   # stable key
 if "lang" not in st.session_state: st.session_state.lang="en"
+
+# ---------- Core calcs ----------
+def compute_core(feed_tds, product_tds, feed_flow, product_flow, reject_flow_in,
+                 temperature_c, hp_out_bar, brine_bar, perm_bp_bar):
+    reject_flow = reject_flow_in if reject_flow_in>0 else max(feed_flow - product_flow, 0.0)
+    recovery   = (product_flow/feed_flow*100.0) if feed_flow>0 else 0.0
+    rejection  = ((feed_tds - product_tds)/feed_tds*100.0) if feed_tds>0 else 0.0
+    salt_pass  = max(0.0, 100.0 - rejection)
+
+    feed_salt = feed_tds*feed_flow; perm_salt = product_tds*product_flow
+    reject_tds = ((feed_salt - perm_salt)/reject_flow) if reject_flow>0 else 0.0
+    cf = (reject_tds/feed_tds) if feed_tds>0 else 0.0
+    out_mg_min = perm_salt + reject_tds*reject_flow
+    mb_error = ((out_mg_min - feed_salt)/feed_salt*100.0) if feed_salt>0 else 0.0
+
+    temp_factor = 1.0 + 0.02 * (temperature_c - 25.0)/25.0
+    pi_feed = 0.0008*feed_tds*temp_factor; pi_perm=0.0008*product_tds*temp_factor
+    d_pi = max(pi_feed - pi_perm, 0.0)
+
+    dP = max(hp_out_bar - brine_bar, 0.0)
+    feed_avg = (hp_out_bar + brine_bar)/2.0 if (hp_out_bar>0 and brine_bar>0) else hp_out_bar
+    ndp = max(feed_avg - perm_bp_bar - d_pi, 0.0)
+
+    return {"recovery":round(recovery,2),"rejection":round(rejection,2),"salt_pass":round(salt_pass,2),
+            "reject_flow":round(reject_flow,3),"reject_tds":round(reject_tds,2),"cf":round(cf,3),
+            "mb_error":round(mb_error,2),"pi_feed":round(pi_feed,3),"pi_perm":round(pi_perm,3),
+            "d_pi":round(d_pi,3),"dP":round(dP,3),"ndp":round(ndp,3)}
+
+def compute_max_safe_output(feed_tds, product_tds, feed_flow, cf_limit=2.5):
+    """Return (Qp_max_LPM, Qr_LPM, reject_tds_ppm) using mass balance at a CF limit."""
+    if feed_tds <= 0 or feed_flow <= 0: return 0.0, feed_flow, 0.0
+    # Qp = Qf * (1 - CF) / ((Cp/Cf) - CF)
+    denom = (product_tds / float(feed_tds)) - cf_limit
+    if denom >= 0:  # avoid division by zero or positive (no solution)
+        return 0.0, feed_flow, feed_tds
+    qf = float(feed_flow)
+    qp = qf * (1.0 - cf_limit) / denom
+    qp = max(0.0, min(qp, qf))
+    qr = max(qf - qp, 0.0)
+    # reject TDS from mass balance:
+    rej_tds = ((feed_tds*qf - product_tds*qp) / qr) if qr>0 else feed_tds
+    return round(qp,2), round(qr,2), round(rej_tds,2)
+
+def scaling_risk_label(cf):
+    if cf <= 2.0: return "Low"
+    if cf <= 2.5: return "Medium"
+    if cf <= 3.0: return "High"
+    return "Very High"
+
+# ---------- Performance Status ----------
+def evaluate_status(core: dict) -> tuple[str, list[str]]:
+    reasons=[]
+    rec=core["recovery"]; rej=core["rejection"]; cf=core["cf"]; dp=core["dP"]; ndp=core["ndp"]; mbe=abs(core["mb_error"])
+    if rej < 92: reasons.append("Low rejection (<92%)")
+    if cf  > 3:  reasons.append("High concentration factor (>3.0) → scaling risk")
+    if dp  > 4:  reasons.append("High ΔP (>4 bar) → fouling/plugging suspected")
+    if ndp < 1:  reasons.append("Low NDP (<1 bar) → weak driving force")
+    if mbe > 8:  reasons.append("Mass balance error (>±8%) → verify meters/readings")
+    if rec > 80: reasons.append("Very high recovery (>80%) → scaling risk")
+    if rec < 25: reasons.append("Very low recovery (<25%) → capacity under-used")
+
+    if (rej >= 95 and cf <= 2.5 and 1 <= ndp and dp <= 3 and mbe <= 5 and 35 <= rec <= 75):
+        status="Good"
+    elif (rej >= 92 and cf <= 3.0 and ndp >= 1.0 and dp <= 4 and mbe <= 8):
+        status="OK"
+    else:
+        status="Needs attention"
+
+    if status != "Needs attention":
+        reasons = [r for r in reasons if "recovery" not in r.lower()]
+    return status, reasons
+
+def overall_text(status):
+    return "Good" if status=="Good" else ("Average" if status=="OK" else "Poor")
+
+def make_notes(core, max_qp, cf_limit):
+    notes=[]
+    # product quality
+    if core["rejection"] >= 95: notes.append("Product quality is good (rejection ≥95%).")
+    elif core["rejection"] >= 92: notes.append("Product quality acceptable (rejection ≥92%).")
+    else: notes.append("Product quality low — check membranes / fouling.")
+
+    # recovery vs max
+    rec_now = core["recovery"]
+    # approximate max recovery at cf_limit using max_qp
+    # (if feed_flow > 0)
+    notes.append(f"Current recovery {rec_now:.1f}%. Max safe output (CF≤{cf_limit}) ≈ {max_qp:.0f} LPM.")
+
+    # pressures
+    if core["dP"] > 4: notes.append("ΔP high — possible fouling/plugging.")
+    else: notes.append("ΔP normal.")
+
+    if core["ndp"] < 1: notes.append("NDP low — increase driving force (check pressures/backpressure).")
+    else: notes.append("NDP OK.")
+
+    # mass balance
+    if abs(core["mb_error"]) > 5: notes.append("Mass balance off (>±5%) — verify meters.")
+    else: notes.append("Mass balance OK.")
+
+    # scaling
+    risk = scaling_risk_label(core["cf"])
+    notes.append(f"Scaling risk: {risk} (CF={core['cf']:.2f}).")
+    return notes[:6]
 
 # ---------- Auth ----------
 def auth_login(email, password):
@@ -220,56 +326,6 @@ def submit_capacity_request(user_id: int, requested_limit: int) -> str:
              (user_id, int(requested_limit), "pending"))
     return t("req_done", st.session_state.lang)
 
-# ---------- Core calc (no energy/kWh) ----------
-def compute_core(feed_tds, product_tds, feed_flow, product_flow, reject_flow_in,
-                 temperature_c, hp_out_bar, brine_bar, perm_bp_bar):
-    reject_flow = reject_flow_in if reject_flow_in>0 else max(feed_flow - product_flow, 0.0)
-    recovery   = (product_flow/feed_flow*100.0) if feed_flow>0 else 0.0
-    rejection  = ((feed_tds - product_tds)/feed_tds*100.0) if feed_tds>0 else 0.0
-    salt_pass  = max(0.0, 100.0 - rejection)
-
-    feed_salt = feed_tds*feed_flow; perm_salt = product_tds*product_flow
-    reject_tds = ((feed_salt - perm_salt)/reject_flow) if reject_flow>0 else 0.0
-    cf = (reject_tds/feed_tds) if feed_tds>0 else 0.0
-    out_mg_min = perm_salt + reject_tds*reject_flow
-    mb_error = ((out_mg_min - feed_salt)/feed_salt*100.0) if feed_salt>0 else 0.0
-
-    temp_factor = 1.0 + 0.02 * (temperature_c - 25.0)/25.0
-    pi_feed = 0.0008*feed_tds*temp_factor; pi_perm=0.0008*product_tds*temp_factor
-    d_pi = max(pi_feed - pi_perm, 0.0)
-
-    dP = max(hp_out_bar - brine_bar, 0.0)
-    feed_avg = (hp_out_bar + brine_bar)/2.0 if (hp_out_bar>0 and brine_bar>0) else hp_out_bar
-    ndp = max(feed_avg - perm_bp_bar - d_pi, 0.0)
-
-    return {"recovery":round(recovery,2),"rejection":round(rejection,2),"salt_pass":round(salt_pass,2),
-            "reject_flow":round(reject_flow,3),"reject_tds":round(reject_tds,2),"cf":round(cf,3),
-            "mb_error":round(mb_error,2),"pi_feed":round(pi_feed,3),"pi_perm":round(pi_perm,3),
-            "d_pi":round(d_pi,3),"dP":round(dP,3),"ndp":round(ndp,3)}
-
-# ---------- Performance Status ----------
-def evaluate_status(core: dict) -> tuple[str, list[str]]:
-    reasons=[]
-    rec=core["recovery"]; rej=core["rejection"]; cf=core["cf"]; dp=core["dP"]; ndp=core["ndp"]; mbe=abs(core["mb_error"])
-    if rej < 92: reasons.append("Low rejection (<92%)")
-    if cf  > 3:  reasons.append("High concentration factor (>3.0) → scaling risk")
-    if dp  > 4:  reasons.append("High ΔP (>4 bar) → fouling/plugging suspected")
-    if ndp < 1:  reasons.append("Low NDP (<1 bar) → weak driving force")
-    if mbe > 8:  reasons.append("Mass balance error (>±8%) → verify meters/readings")
-    if rec > 80: reasons.append("Very high recovery (>80%) → scaling risk")
-    if rec < 25: reasons.append("Very low recovery (<25%) → capacity under-used")
-
-    if (rej >= 95 and cf <= 2.5 and 1 <= ndp and dp <= 3 and mbe <= 5 and 35 <= rec <= 75):
-        status="Good"
-    elif (rej >= 92 and cf <= 3.0 and ndp >= 1.0 and dp <= 4 and mbe <= 8):
-        status="OK"
-    else:
-        status="Needs attention"
-
-    if status != "Needs attention":
-        reasons = [r for r in reasons if "recovery" not in r.lower()]
-    return status, reasons
-
 # =================== Part 2/4 — Auth • Professional App Layout ===================
 
 def auth_page():
@@ -305,8 +361,7 @@ def app_page():
     col_stage, col_names, col_env = st.columns([1.2, 2.0, 1.3])
 
     with col_stage:
-        # stable keys; translate only for display
-        stage_keys = ["single", "two", "three"]
+        stage_keys = ["single", "two", "three"]  # stable keys
         try:
             idx = stage_keys.index(st.session_state.stage_choice)
         except ValueError:
@@ -318,6 +373,9 @@ def app_page():
             format_func=lambda k: t(k, lang)
         )
         st.session_state.stage_choice = stage_choice
+
+        # CF limit selector (for max safe output)
+        cf_limit = st.slider("CF limit for Max Output", 2.0, 3.0, 2.5, 0.1)
 
     with col_names:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
@@ -368,6 +426,49 @@ def app_page():
     else:
         r1=r2=r3=0.0; p1_tds=p2_tds=p3_tds=float(product_tds)
 
+    # ===== Compute =====
+    reject_flow = reject_flow_in if reject_flow_in > 0 else max(feed_flow - product_flow, 0.0)
+    core = compute_core(feed_tds, product_tds, feed_flow, product_flow, reject_flow,
+                        temperature_c, hp_out_bar, brine_bar, perm_bp_bar)
+    LPM_TO_M3D = 1.44; prod_m3d = product_flow * LPM_TO_M3D; core["prod_m3d"]=round(prod_m3d,2)
+
+    # Max safe output at chosen CF limit
+    qp_max, qr_at_max, rej_tds_at_max = compute_max_safe_output(feed_tds, product_tds, feed_flow, cf_limit)
+
+    # ===== NEW: Quick tiles =====
+    k0 = st.columns(6)
+    with k0[0]: st.metric("Reject Flow (LPM)", f"{reject_flow:.2f}")
+    with k0[1]: st.metric(t("max_out",lang)+f" (CF≤{cf_limit:.1f})", f"{qp_max:.2f}")
+    with k0[2]: st.metric(t("scaling_risk",lang), scaling_risk_label(core["cf"]))
+
+    # ===== KPI Cards (2 rows) =====
+    st.markdown(f"<div class='section-title'>{t('results',lang)}</div>", unsafe_allow_html=True)
+    k1 = st.columns(6)
+    with k1[0]: st.metric(t("recovery",lang),   f"{core['recovery']:.2f}")
+    with k1[1]: st.metric(t("rejection",lang),  f"{core['rejection']:.2f}")
+    with k1[2]: st.metric(t("salt_pass",lang),  f"{core['salt_pass']:.2f}")
+    with k1[3]: st.metric(t("reject_tds",lang), f"{core['reject_tds']:.2f}")
+    with k1[4]: st.metric(t("cf",lang),         f"{core['cf']:.3f}")
+    with k1[5]: st.metric(t("mb",lang),         f"{core['mb_error']:.2f}")
+
+    k2 = st.columns(6)
+    with k2[0]: st.metric(t("dp",lang),      f"{core['dP']:.2f}")
+    with k2[1]: st.metric(t("pi_feed",lang), f"{core['pi_feed']:.2f}")
+    with k2[2]: st.metric(t("pi_perm",lang), f"{core['pi_perm']:.2f}")
+    with k2[3]: st.metric(t("dpi",lang),     f"{core['d_pi']:.2f}")
+    with k2[4]: st.metric(t("ndp",lang),     f"{core['ndp']:.2f}")
+    with k2[5]: st.metric(t("prod",lang),    f"{core['prod_m3d']:.2f}")
+
+    # ===== Overall status + Notes =====
+    st.markdown(f"<div class='section-title'>{t('overall',lang)}</div>", unsafe_allow_html=True)
+    status, reasons = evaluate_status(core)
+    status_box = "good" if status=="Good" else ("ok" if status=="OK" else "bad")
+    overall = overall_text(status)
+    st.markdown(f"<div class='card {status_box}'><b>{overall}</b> — {t('status_hdr',lang)}: {status}</div>", unsafe_allow_html=True)
+
+    notes = make_notes(core, qp_max, cf_limit)
+    st.markdown(f"<div class='card'><b>{t('notes',lang)}</b><div class='note'>" + "<br>".join("• "+n for n in notes) + "</div></div>", unsafe_allow_html=True)
+
     # ===== Per-vessel inputs (paged) =====
     def vessel_inputs(label: str, default_count: int, key_prefix: str):
         st.markdown(f"<div class='section-title'>{t('vessel_hdr',lang).format(label)}</div>", unsafe_allow_html=True)
@@ -390,67 +491,6 @@ def app_page():
         v_s1 = vessel_inputs(t("s1",lang), 6, "s1"); v_s2 = vessel_inputs(t("s2",lang), 3, "s2"); v_s3=[]
     else:
         v_s1 = vessel_inputs(t("s1",lang), 6, "s1"); v_s2 = vessel_inputs(t("s2",lang), 3, "s2"); v_s3 = vessel_inputs(t("s3",lang), 2, "s3")
-
-    # ===== Capacity banner + request =====
-    ok_cap, msg_cap = user_can_use_capacity(st.session_state.user, capacity)
-    st.info(msg_cap)
-    if not ok_cap:
-        colsreq = st.columns([2,1])
-        with colsreq[0]:
-            st.warning(t("limit_hit",lang))
-        with colsreq[1]:
-            requested_limit = st.number_input(t("req_label",lang), min_value=max(6,int(st.session_state.user["capacity_limit"])+1),
-                                              value=max(10,int(st.session_state.user["capacity_limit"])+5), step=1)
-            if st.button(t("req_more",lang)): st.success(submit_capacity_request(st.session_state.user["id"], int(requested_limit)))
-
-    # ===== Compute =====
-    reject_flow = reject_flow_in if reject_flow_in > 0 else max(feed_flow - product_flow, 0.0)
-    core = compute_core(feed_tds, product_tds, feed_flow, product_flow, reject_flow,
-                        temperature_c, hp_out_bar, brine_bar, perm_bp_bar)
-    LPM_TO_M3D = 1.44; prod_m3d = product_flow * LPM_TO_M3D; core["prod_m3d"]=round(prod_m3d,2)
-
-    # ===== KPI Cards (2 rows) =====
-    st.markdown(f"<div class='section-title'>{t('results',lang)}</div>", unsafe_allow_html=True)
-    k1 = st.columns(6)
-    with k1[0]: st.metric(t("recovery",lang),   f"{core['recovery']:.2f}")
-    with k1[1]: st.metric(t("rejection",lang),  f"{core['rejection']:.2f}")
-    with k1[2]: st.metric(t("salt_pass",lang),  f"{core['salt_pass']:.2f}")
-    with k1[3]: st.metric(t("reject_tds",lang), f"{core['reject_tds']:.2f}")
-    with k1[4]: st.metric(t("cf",lang),         f"{core['cf']:.3f}")
-    with k1[5]: st.metric(t("mb",lang),         f"{core['mb_error']:.2f}")
-
-    k2 = st.columns(6)
-    with k2[0]: st.metric(t("dp",lang),      f"{core['dP']:.2f}")
-    with k2[1]: st.metric(t("pi_feed",lang), f"{core['pi_feed']:.2f}")
-    with k2[2]: st.metric(t("pi_perm",lang), f"{core['pi_perm']:.2f}")
-    with k2[3]: st.metric(t("dpi",lang),     f"{core['d_pi']:.2f}")
-    with k2[4]: st.metric(t("ndp",lang),     f"{core['ndp']:.2f}")
-    with k2[5]: st.metric(t("prod",lang),    f"{core['prod_m3d']:.2f}")
-
-    # ===== Performance Status + Flags =====
-    st.markdown("<div class='section-title'>Health & Status</div>", unsafe_allow_html=True)
-    hc1, hc2 = st.columns([1,1])
-    with hc1:
-        status, reasons = evaluate_status(core)
-        css = "good" if status=="Good" else ("ok" if status=="OK" else "bad")
-        st.markdown(f"<div class='card {css}'><b>{t('status_hdr',lang)}:</b> {status}</div>", unsafe_allow_html=True)
-        if reasons:
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            for r in reasons: st.write("• " + r)
-            st.markdown("</div>", unsafe_allow_html=True)
-    with hc2:
-        flags=[]
-        if core["recovery"]>80: flags.append(t("flag_hi_rec",lang))
-        if core["dP"]>3:        flags.append(t("flag_hi_dp",lang))
-        if core["ndp"]<1:       flags.append(t("flag_low_ndp",lang))
-        if abs(core["mb_error"])>5: flags.append(t("flag_mb",lang))
-        st.markdown(f"<div class='card'><b>{t('flags',lang)}</b></div>", unsafe_allow_html=True)
-        if flags:
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            for f in flags: st.write("• " + f)
-            st.markdown("</div>", unsafe_allow_html=True)
-        else:
-            st.markdown(f"<div class='card ok'>• {t('ok',lang)}</div>", unsafe_allow_html=True)
 
     # ===== Per-vessel table =====
     def stage_reject_tds(qf, feed_ppm, rec_frac, perm_ppm):
@@ -510,7 +550,7 @@ def app_page():
                        VALUES(datetime('now'),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (st.session_state.user["id"],plant_name,site_name,capacity,temperature_c,
                      feed_tds,product_tds,feed_flow,product_flow,reject_flow,
-                     hp_out_bar,brine_bar,perm_bp_bar,stage_choice,   # keep key in DB
+                     hp_out_bar,brine_bar,perm_bp_bar,stage_choice,
                      core["recovery"],core["rejection"],core["salt_pass"],core["reject_tds"],core["cf"],core["mb_error"],
                      core["dP"],core["pi_feed"],core["pi_perm"],core["d_pi"],core["ndp"],core["prod_m3d"])
                 )
@@ -519,21 +559,23 @@ def app_page():
     # ===== Exports =====
     export_section(core, plant_name, site_name, capacity, temperature_c, stage_choice,
                    feed_tds, product_tds, feed_flow, product_flow, reject_flow,
-                   hp_out_bar, brine_bar, perm_bp_bar, df_vessels)
+                   hp_out_bar, brine_bar, perm_bp_bar, df_vessels, qp_max, cf_limit)
 
 # =================== Part 3/4 — Exports (one-sheet Excel + polished PDF) ===================
 
 def export_section(core, plant_name, site_name, capacity, temperature_c, stage_choice,
                    feed_tds, product_tds, feed_flow, product_flow, reject_flow,
-                   hp_out_bar, brine_bar, perm_bp_bar, df_vessels):
+                   hp_out_bar, brine_bar, perm_bp_bar, df_vessels, qp_max, cf_limit):
     lang = st.session_state.lang
 
     # Overall status text
     status, reasons = evaluate_status(core)
-    status_text = status if not reasons else f"{status} — " + "; ".join(reasons[:6])
+    overall = overall_text(status)
+    status_text = f"{overall} — {status}"
+    if reasons: status_text += " — " + "; ".join(reasons[:6])
 
     # -------- Tables for export --------
-    display_stage = t(stage_choice, lang)  # show translated label
+    display_stage = t(stage_choice, lang)  # translated label
     df_inputs = pd.DataFrame({
         "Parameter":[t("plant_name",lang),t("site_name",lang),t("capacity",lang),t("temp",lang),t("stage_type",lang),
                      t("feed_tds",lang),t("perm_tds",lang),t("feed_flow",lang),t("perm_flow",lang),t("rej_flow",lang),
@@ -542,16 +584,24 @@ def export_section(core, plant_name, site_name, capacity, temperature_c, stage_c
                  feed_flow,product_flow,reject_flow,hp_out_bar,brine_bar,perm_bp_bar]
     })
 
+    notes = make_notes(core, qp_max, cf_limit)
+
     df_outputs = pd.DataFrame({
         "KPI":[
             "Performance Status",
+            "Reject Flow (LPM)",
+            t("max_out",lang)+f" (CF≤{cf_limit:.1f})",
             t("recovery",lang),t("rejection",lang),t("salt_pass",lang),t("reject_tds",lang),t("cf",lang),
-            t("mb",lang),t("dp",lang),t("pi_feed",lang),t("pi_perm",lang),t("dpi",lang),t("ndp",lang),t("prod",lang)
+            t("mb",lang),t("dp",lang),t("pi_feed",lang),t("pi_perm",lang),t("dpi",lang),t("ndp",lang),t("prod",lang),
+            t("notes",lang)
         ],
         "Value":[
             status_text,
+            core["reject_flow"],
+            qp_max,
             core["recovery"],core["rejection"],core["salt_pass"],core["reject_tds"],core["cf"],
-            core["mb_error"],core["dP"],core["pi_feed"],core["pi_perm"],core["d_pi"],core["ndp"],core["prod_m3d"]
+            core["mb_error"],core["dP"],core["pi_feed"],core["pi_perm"],core["d_pi"],core["ndp"],core["prod_m3d"],
+            " | ".join(notes)
         ]
     })
 
@@ -661,19 +711,20 @@ def export_section(core, plant_name, site_name, capacity, temperature_c, stage_c
                 line(f"{p}: {v}")
 
             line(t("outputs",lang), 16, True)
-            for k,v in df_outputs.itertuples(index=False):
-                if isinstance(v,(int,float)): line(f"{k}: {v:.3f}")
-                else: line(f"{k}: {v}")
+            line("Performance: " + (overall_text(evaluate_status(core)[0])))
+            for k in ["Reject Flow (LPM)", t("max_out",lang)+f" (CF≤{cf_limit:.1f})",
+                      t("recovery",lang), t("rejection",lang), t("salt_pass",lang),
+                      t("reject_tds",lang), t("cf",lang), t("mb",lang),
+                      t("dp",lang), t("pi_feed",lang), t("pi_perm",lang), t("dpi",lang), t("ndp",lang), t("prod",lang)]:
+                v = df_outputs[df_outputs["KPI"]==k]["Value"].values
+                if len(v):
+                    vv=v[0]
+                    if isinstance(vv,(int,float)): line(f"{k}: {vv:.3f}")
+                    else: line(f"{k}: {vv}")
 
-            if not df_vessels.empty:
-                line(t("per_vessel",lang), 16, True)
-                for _,r in df_vessels.head(25).iterrows():
-                    line(f"{r['Stage']} V{int(r[t('vessel',lang)])}: "
-                         f"Out {float(r[t('out_ppm',lang)]):.1f} ppm | "
-                         f"Rej {float(r[t('rej_pct',lang)]):.2f}% | "
-                         f"Pass {float(r[t('pass_pct',lang)]):.2f}%")
-                if len(df_vessels) > 25:
-                    line(f"... +{len(df_vessels)-25} more vessels (see Excel).")
+            line(t("notes",lang), 16, True)
+            for n in make_notes(core, qp_max, cf_limit):
+                line("• " + n)
 
             c.showPage(); c.save()
             st.download_button(
@@ -789,7 +840,7 @@ How to use
 2) Fill {t('plant_name',lang)} / {t('site_name',lang)} / {t('capacity',lang)} / {t('temp',lang)}.
 3) Enter TDS, flows, pressures.
 4) Enter {t('per_vessel',lang)} (paged).
-5) Review {t('results',lang)}, **{t('status_hdr',lang)} and {t('flags',lang)}.
+5) Review {t('results',lang)}, **{t('status_hdr',lang)}, *{t('max_out',lang)} and {t('flags',lang)}.
 6) {t('save',lang)} to keep in {t('history',lang)}, or export **Excel/PDF.
 7) If you hit the 5 capacity limit, click **{t('req_more',lang)} to ask admin.
 """)
