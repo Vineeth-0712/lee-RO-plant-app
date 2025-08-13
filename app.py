@@ -18,7 +18,7 @@ st.markdown(
     <style>
       .lw-title {{ text-align:center; color:{PRIMARY_HEX}; font-weight:800; font-size:28px; margin:4px 0 4px; }}
       .lw-sub   {{ text-align:center; color:#4b5563; font-size:13px; margin-bottom:16px; }}
-      .stButton>button {{ border-radius:10px; padding:0.5rem 1rem; }}
+      .stButton>button {{ border-radius:10px; padding:0.55rem 1rem; font-weight:600; }}
       .card {{
           background:#ffffff; border:1px solid #e5e7eb; border-radius:14px; padding:14px; margin-bottom:12px;
           box-shadow: 0 1px 2px rgba(0,0,0,0.04);
@@ -31,12 +31,13 @@ st.markdown(
       .muted {{ color:#6b7280; font-size:12px; }}
       .note  {{ font-size:13px; color:#374151; line-height:1.35; }}
       footer {{ visibility:hidden; }}
+      .form-title {{ font-size:14px; color:#374151; font-weight:700; margin-bottom:6px; }}
     </style>
     """,
     unsafe_allow_html=True
 )
 st.markdown(f"<div class='lw-title'>{BRAND} – RO Plant Calculator Pro</div>", unsafe_allow_html=True)
-st.markdown("<div class='lw-sub'>Admin/User • Login • Per-Vessel • Pro KPIs • Max Output • Health Score • Excel/PDF • History • Capacity Requests</div>", unsafe_allow_html=True)
+st.markdown("<div class='lw-sub'>Login • Clean Inputs • Calculate → Results • Executive Summary • Max Output • Excel/PDF • History • Admin</div>", unsafe_allow_html=True)
 
 # ---------- Paths ----------
 APP_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -72,7 +73,7 @@ T = {
         "save":"Save this run","saved":"Run saved to history ✅",
         "export_excel":"📥 Download Excel report (1 sheet)","export_pdf":"📄 Download PDF report",
         "flags":"Health Flags","ok":"OK","flag_hi_rec":"Recovery very high (>80%) → scaling risk",
-        "flag_hi_dp":"High ΔP (>3 bar) → fouling/plugging check","flag_low_ndp":"Low NDP (<1 bar) → low driving force","flag_mb":"Mass balance outside ±5% → verify readings",
+        "flag_hi_dp":"High ΔP (>4 bar) → fouling/plugging check","flag_low_ndp":"Low NDP (<1 bar) → low driving force","flag_mb":"Mass balance outside ±5% → verify readings",
         "limit_hit":"You reached your capacity limit (max 5 unique capacities).",
         "req_more":"📩 Request more capacity","req_label":"Request new total capacity limit",
         "req_done":"Request sent. Admin will review.","req_pending":"A request is already pending. The admin will review it.",
@@ -81,8 +82,9 @@ T = {
         "filter_plant":"Filter by Plant Name","filter_site":"Filter by Site","export_hist":"📥 Export History (CSV)",
         "register_ok":"Registered. Please log in.","email_used":"Email already registered.","pwd_mismatch":"Passwords do not match.","need_ep":"Email & password required.","need_en":"Email & new password required.",
         "pwd_updated":"Password updated. Go to Login.","admin_only":"Admin only.",
-        # extra labels
-        "overall":"Overall Plant Status","notes":"Notes","max_out":"Max Safe Output (LPM)","scaling_risk":"Scaling Risk"
+        # NEW labels
+        "overall":"Overall Plant Status","notes":"Notes","max_out":"Max Safe Output (LPM)","scaling_risk":"Scaling Risk",
+        "calc":"Calculate"
     },
     "ar": {"login":"تسجيل الدخول","register":"تسجيل","forgot":"نسيت كلمة المرور","app":"التطبيق","history":"السجل","admin":"الإدارة","help":"مساعدة",
            "plant_calc":"حاسبة أداء محطة RO","plant_name":"اسم المحطة","site_name":"الموقع","capacity":"السعة (م³/يوم)","temp":"الحرارة (°م)",
@@ -90,21 +92,24 @@ T = {
            "hp":"ضغط المضخة","brine":"ضغط الرجيع","perm_bp":"ضغط رجعي للمنتج","stage_type":"نوع المراحل","single":"مرحلة واحدة","two":"مرحلتان","three":"ثلاث مراحل",
            "s1":"المرحلة 1","s2":"المرحلة 2","s3":"المرحلة 3","results":"النتائج","status_hdr":"تقييم الأداء",
            "save":"حفظ","saved":"تم الحفظ","export_excel":"تنزيل Excel","export_pdf":"تنزيل PDF",
-           "flags":"مؤشرات الصحة","ok":"سليم","limit_hit":"تم الوصول للحد","req_more":"طلب سعة أكبر","req_label":"الحد الجديد المطلوب"},
+           "flags":"مؤشرات الصحة","ok":"سليم","limit_hit":"تم الوصول للحد","req_more":"طلب سعة أكبر","req_label":"الحد الجديد المطلوب",
+           "calc":"احسب"},
     "ml": {"login":"ലോഗിൻ","register":"രജിസ്റ്റർ","forgot":"പാസ്‌വേഡ് മറന്നോ","app":"ആപ്പ്","history":"ഹിസ്റ്ററി","admin":"അഡ്മിൻ","help":"ഹെൽപ്പ്",
            "plant_calc":"RO പ്ലാന്റ് പെർഫോർമൻസ് കാൽക്കുലേറ്റർ","plant_name":"പ്ലാന്റ് പേര്","site_name":"സൈറ്റ്","capacity":"ശേഷി (മീ³/ദിവസം)","temp":"താപനില (°C)",
            "feed_tds":"ഫീഡ് TDS","perm_tds":"പ്രോഡക്ട് TDS","feed_flow":"ഫീഡ് ഫ്ലോ","perm_flow":"പ്രോഡക്റ്റ് ഫ്ലോ","rej_flow":"റിജക്ട് ഫ്ലോ [ഓപ്ഷണൽ]",
            "hp":"HP ഡിസ്ചാർജ്","brine":"ബ്രൈൻ പ്രഷർ","perm_bp":"പെർമിയേറ്റ് ബാക്ക്‌പ്രഷർ","stage_type":"സ്റ്റേജ് തരം","single":"സിംഗിൾ","two":"ടു സ്റ്റേജ്","three":"ത്രീ സ്റ്റേജ്",
            "s1":"സ്റ്റേജ്-1","s2":"സ്റ്റേജ്-2","s3":"സ്റ്റേജ്-3","results":"ഫലം","status_hdr":"പെർഫോർമൻസ് സ്റ്റാറ്റസ്",
            "save":"റൺ സേവ് ചെയ്യുക","saved":"സേവ് ചെയ്തു","export_excel":"Excel ഡൗൺലോഡ്","export_pdf":"PDF ഡൗൺലോഡ്",
-           "flags":"ഹെൽത്ത് ഫ്ലാഗ്സ്","ok":"OK","limit_hit":"പരിമಿತಿ എത്തിയിരിക്കുന്നു","req_more":"കപ്പാസിറ്റി കൂട്ടാൻ അഭ്യർത്ഥിക്കൂ","req_label":"പുതിയ ലിമിറ്റ്"},
+           "flags":"ഹെൽത്ത് ഫ്ലാഗ്സ്","ok":"OK","limit_hit":"പരിമിതി എത്തിയിരിക്കുന്നു","req_more":"കപ്പാസിറ്റി കൂട്ടാൻ അഭ്യർത്ഥിക്കൂ","req_label":"പുതിയ ലിമിറ്റ്",
+           "calc":"ക്യാലകുലേറ്റ്"},
     "hi": {"login":"लॉगिन","register":"रजिस्टर","forgot":"पासवर्ड भूल गए","app":"ऐप","history":"इतिहास","admin":"एडमिन","help":"सहायता",
            "plant_calc":"RO प्लांट परफॉर्मेंस कैलकुलेटर","plant_name":"प्लांट नाम","site_name":"साइट","capacity":"क्षमता (m³/दिन)","temp":"तापमान (°C)",
            "feed_tds":"फीड TDS","perm_tds":"प्रोडक्ट TDS","feed_flow":"फीड फ्लो","perm_flow":"प्रोडक्ट फ्लो","rej_flow":"रिजेक्ट फ्लो [वैकल्पिक]",
            "hp":"HP डिस्चार्ज","brine":"ब्राइन प्रेशर","perm_bp":"परम बैकप्रेशर","stage_type":"स्टेज प्रकार","single":"सिंगल","two":"टू-स्टेज","three":"थ्री-स्टेज",
            "s1":"स्टेज-1","s2":"स्टेज-2","s3":"स्टेज-3","results":"परिणाम","status_hdr":"प्रदर्शन स्थिति",
            "save":"रन सेव करें","saved":"सेव किया","export_excel":"Excel डाउनलोड","export_pdf":"PDF डाउनलोड",
-           "flags":"हेल्थ फ्लैग","ok":"OK","limit_hit":"सीमा पूरी हो गई","req_more":"क्षमता बढ़ाने का अनुरोध","req_label":"नया लिमिट"}
+           "flags":"हेल्थ फ्लैग","ok":"OK","limit_hit":"सीमा पूरी हो गई","req_more":"क्षमता बढ़ाने का अनुरोध","req_label":"नया लिमिट",
+           "calc":"कैलकुलेट"}
 }
 def t(k, lang): return T.get(lang, T["en"]).get(k, T["en"].get(k, k))
 
@@ -166,12 +171,13 @@ def ensure_admin():
                  (ADMIN_EMAIL, ADMIN_PASSWORD, "admin", 999))
 
 init_db(); migrate_db(); ensure_admin()
-
 # ---------- Session ----------
 if "page" not in st.session_state: st.session_state.page="auth"
 if "user" not in st.session_state: st.session_state.user=None
 if "stage_choice" not in st.session_state: st.session_state.stage_choice="single"   # stable key
 if "lang" not in st.session_state: st.session_state.lang="en"
+if "last_calc" not in st.session_state: st.session_state.last_calc=None  # store last results
+
 # ---------- Core calcs ----------
 def compute_core(feed_tds, product_tds, feed_flow, product_flow, reject_flow_in,
                  temperature_c, hp_out_bar, brine_bar, perm_bp_bar):
@@ -203,8 +209,8 @@ def compute_max_safe_output(feed_tds, product_tds, feed_flow, cf_limit=2.5):
     """Return (Qp_max_LPM, Qr_LPM, reject_tds_ppm) using mass balance at a CF limit."""
     if feed_tds <= 0 or feed_flow <= 0: return 0.0, feed_flow, 0.0
     denom = (product_tds / float(feed_tds)) - cf_limit
-    if denom >= 0:  # avoid division by zero or positive (no solution)
-        return 0.0, float(feed_flow), float(feed_tds)
+    if denom >= 0:
+        return 0.0, feed_flow, feed_tds
     qf = float(feed_flow)
     qp = qf * (1.0 - cf_limit) / denom
     qp = max(0.0, min(qp, qf))
@@ -244,55 +250,28 @@ def evaluate_status(core: dict) -> tuple[str, list[str]]:
 def overall_text(status):
     return "Good" if status=="Good" else ("Average" if status=="OK" else "Poor")
 
-# ---------- Health score + summaries ----------
-def health_score(core):
-    """
-    0..100 score mixing key KPIs:
-      + Rejection (40%), CF (20%), ΔP (15%), NDP (15%), Mass balance (10%)
-    """
-    rej = max(0.0, min(core["rejection"], 100.0)) / 100.0
-    cf_norm = 1.0 if core["cf"] <= 2.0 else max(0.0, 1.0 - (core["cf"] - 2.0) / 2.0)   # <=2 best, >=4 worst
-    dp_norm = 1.0 if core["dP"] <= 2.0 else max(0.0, 1.0 - (core["dP"] - 2.0) / 4.0)    # <=2 best, >=6 worst
-    ndp_norm = 0.0 if core["ndp"] <= 0 else (1.0 if core["ndp"] >= 1.0 else core["ndp"]/1.0)
-    mbe_norm = 1.0 if abs(core["mb_error"]) <= 2.0 else max(0.0, 1.0 - (abs(core["mb_error"]) - 2.0) / 8.0)
-    score = (0.40*rej + 0.20*cf_norm + 0.15*dp_norm + 0.15*ndp_norm + 0.10*mbe_norm) * 100.0
-    return round(score, 1)
+def make_notes(core, max_qp, cf_limit):
+    notes=[]
+    if core["rejection"] >= 95: notes.append("Product quality is good (rejection ≥95%).")
+    elif core["rejection"] >= 92: notes.append("Product quality acceptable (rejection ≥92%).")
+    else: notes.append("Product quality low — check membranes / fouling.")
 
-def plant_condition_label(score):
-    if score >= 85: return "Good"
-    if score >= 70: return "OK"
-    if score >= 55: return "Average"
-    return "Poor"
+    rec_now = core["recovery"]
+    notes.append(f"Current recovery {rec_now:.1f}%. Max safe output (CF≤{cf_limit}) ≈ {max_qp:.0f} LPM.")
 
-def one_line_summary(core):
-    bits = []
-    bits.append("Product water quality good" if core["rejection"] >= 95
-                else ("Product quality acceptable" if core["rejection"] >= 92 else "Product quality low"))
-    if core["cf"] > 3.0: bits.append("scaling risk (high CF)")
-    elif core["cf"] > 2.5: bits.append("near CF limit")
-    if core["dP"] > 4.0: bits.append("ΔP high (possible fouling)")
-    if core["ndp"] < 1.0: bits.append("low NDP (weak driving force)")
-    if abs(core["mb_error"]) > 5.0: bits.append("mass balance off")
-    if not bits: bits.append("operating in a healthy window")
-    return "; ".join(bits)
+    if core["dP"] > 4: notes.append("ΔP high — possible fouling/plugging.")
+    else: notes.append("ΔP normal.")
 
-def top_actions(core):
-    actions = []
-    if core["cf"] > 2.8:
-        actions.append("Lower recovery by 5–10% or increase reject to reduce CF")
-    elif core["cf"] > 2.5:
-        actions.append("Trim recovery slightly to keep CF ≤ 2.5")
-    if core["dP"] > 4.0:
-        actions.append("Check prefilters; consider cleaning membranes (ΔP high)")
-    if core["ndp"] < 1.0:
-        actions.append("Reduce permeate backpressure / verify pump discharge to raise NDP")
-    if core["rejection"] < 92:
-        actions.append("Inspect membranes for damage or scaling; consider CIP")
-    if abs(core["mb_error"]) > 5.0:
-        actions.append("Re-verify flow meters / TDS probes (mass balance)")
-    if not actions:
-        actions.append("Maintain current settings; schedule routine checks")
-    return actions[:3]
+    if core["ndp"] < 1: notes.append("NDP low — increase driving force (check pressures/backpressure).")
+    else: notes.append("NDP OK.")
+
+    if abs(core["mb_error"]) > 5: notes.append("Mass balance off (>±5%) — verify meters.")
+    else: notes.append("Mass balance OK.")
+
+    risk = scaling_risk_label(core["cf"])
+    notes.append(f"Scaling risk: {risk} (CF={core['cf']:.2f}).")
+    return notes[:6]
+
 # ---------- Auth ----------
 def auth_login(email, password):
     row=_fetchone("SELECT id,email,role,capacity_limit FROM users WHERE email=? AND password=?",(email.strip(),password))
@@ -341,7 +320,6 @@ def submit_capacity_request(user_id: int, requested_limit: int) -> str:
     _execute("INSERT INTO capacity_requests(user_id, requested_capacity, status) VALUES (?,?,?)",
              (user_id, int(requested_limit), "pending"))
     return t("req_done", st.session_state.lang)
-# =================== App Page ===================
 def auth_page():
     lang = st.session_state.lang
     st.title(f"{BRAND} {t('login',lang)}")
@@ -371,81 +349,135 @@ def app_page():
     topbar()
     st.markdown(f"<div class='section-title'>{t('plant_calc',lang)}</div>", unsafe_allow_html=True)
 
-    # ===== Top controls row =====
-    col_stage, col_names, col_env = st.columns([1.2, 2.0, 1.3])
+    # ===== Inputs on a single FORM with Calculate =====
+    with st.form("inputs_form", border=True):
+        col_stage, col_names, col_env = st.columns([1.2, 2.0, 1.3])
 
-    with col_stage:
-        stage_keys = ["single", "two", "three"]  # stable keys
-        try:
-            idx = stage_keys.index(st.session_state.stage_choice)
-        except ValueError:
-            idx = 0
-        stage_choice = st.radio(
-            t("stage_type", lang),
-            stage_keys,
-            index=idx,
-            format_func=lambda k: t(k, lang)
-        )
-        st.session_state.stage_choice = stage_choice
+        with col_stage:
+            stage_keys = ["single", "two", "three"]  # stable keys
+            try:
+                idx = stage_keys.index(st.session_state.stage_choice)
+            except ValueError:
+                idx = 0
+            stage_choice = st.radio(
+                t("stage_type", lang),
+                stage_keys,
+                index=idx,
+                format_func=lambda k: t(k, lang)
+            )
+            st.session_state.stage_choice = stage_choice
+            cf_limit = st.slider("CF limit for Max Output", 2.0, 3.0, 2.5, 0.1)
 
-        # CF limit selector (for max safe output)
-        cf_limit = st.slider("CF limit for Max Output", 2.0, 3.0, 2.5, 0.1)
+        with col_names:
+            st.markdown("<div class='form-title'>Plant Info</div>", unsafe_allow_html=True)
+            st.markdown("<div class='card'>", unsafe_allow_html=True)
+            plant_name = st.text_input(t("plant_name",lang), "My RO Plant")
+            site_name  = st.text_input(t("site_name",lang), "Site A")
+            st.markdown("</div>", unsafe_allow_html=True)
 
-    with col_names:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        plant_name = st.text_input(t("plant_name",lang), "My RO Plant")
-        site_name  = st.text_input(t("site_name",lang), "Site A")
-        st.markdown("</div>", unsafe_allow_html=True)
+        with col_env:
+            st.markdown("<div class='form-title'>Environment</div>", unsafe_allow_html=True)
+            st.markdown("<div class='card'>", unsafe_allow_html=True)
+            capacity   = st.number_input(t("capacity",lang), 0.0, 100000.0, 100.0)
+            temperature_c = st.number_input(t("temp",lang), 0.0, 60.0, 25.0)
+            st.markdown("</div>", unsafe_allow_html=True)
 
-    with col_env:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        capacity   = st.number_input(t("capacity",lang), 0.0, 100000.0, 100.0)
-        temperature_c = st.number_input(t("temp",lang), 0.0, 60.0, 25.0)
-        st.markdown("</div>", unsafe_allow_html=True)
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("<div class='form-title'>Quality</div>", unsafe_allow_html=True)
+            st.markdown("<div class='card'>", unsafe_allow_html=True)
+            feed_tds    = st.number_input(t("feed_tds",lang), 0.0, 100000.0, 900.0, step=1.0)
+            product_tds = st.number_input(t("perm_tds",lang), 0.0, 100000.0, 120.0, step=1.0)
+            st.markdown("</div>", unsafe_allow_html=True)
+        with c2:
+            st.markdown("<div class='form-title'>Flows (LPM)</div>", unsafe_allow_html=True)
+            st.markdown("<div class='card'>", unsafe_allow_html=True)
+            feed_flow      = st.number_input(t("feed_flow",lang), 0.0, 10000.0, 180.0, step=0.1)
+            product_flow   = st.number_input(t("perm_flow",lang), 0.0, 10000.0, 125.0, step=0.1)
+            reject_flow_in = st.number_input(t("rej_flow",lang), 0.0, 10000.0, 0.0, step=0.1)
+            st.markdown("</div>", unsafe_allow_html=True)
+        with c3:
+            st.markdown("<div class='form-title'>Pressures (bar)</div>", unsafe_allow_html=True)
+            st.markdown("<div class='card'>", unsafe_allow_html=True)
+            hp_out_bar  = st.number_input(t("hp",lang), 0.0, 1000.0, 10.0, step=0.1)
+            brine_bar   = st.number_input(t("brine",lang), 0.0, 1000.0, 7.0, step=0.1)
+            perm_bp_bar = st.number_input(t("perm_bp",lang), 0.0, 1000.0, 0.0, step=0.1)
+            st.markdown("</div>", unsafe_allow_html=True)
 
-    # ===== Inputs rows =====
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.markdown("Quality")
-        feed_tds    = st.number_input(t("feed_tds",lang), 0.0, 100000.0, 900.0, step=1.0)
-        product_tds = st.number_input(t("perm_tds",lang), 0.0, 100000.0, 120.0, step=1.0)
-        st.markdown("</div>", unsafe_allow_html=True)
-    with c2:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.markdown("Flows (LPM)")
-        feed_flow      = st.number_input(t("feed_flow",lang), 0.0, 10000.0, 180.0, step=0.1)
-        product_flow   = st.number_input(t("perm_flow",lang), 0.0, 10000.0, 125.0, step=0.1)
-        reject_flow_in = st.number_input(t("rej_flow",lang), 0.0, 10000.0, 0.0, step=0.1)
-        st.markdown("</div>", unsafe_allow_html=True)
-    with c3:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.markdown("Pressures (bar)")
-        hp_out_bar  = st.number_input(t("hp",lang), 0.0, 1000.0, 10.0, step=0.1)
-        brine_bar   = st.number_input(t("brine",lang), 0.0, 1000.0, 7.0, step=0.1)
-        perm_bp_bar = st.number_input(t("perm_bp",lang), 0.0, 1000.0, 0.0, step=0.1)
-        st.markdown("</div>", unsafe_allow_html=True)
+        # Per-stage sliders (if 2/3 stage)
+        if stage_choice != "single":
+            s1, s2, s3 = st.columns([1,1,1])
+            with s1: r1 = st.slider(t("s_recovery",lang).format(1), 10, 85, 60) / 100.0
+            with s2: r2 = st.slider(t("s_recovery",lang).format(2), 10, 85, 50) / 100.0
+            with s3: r3 = st.slider(t("s_recovery",lang).format(3), 10, 85, 40) / 100.0 if stage_choice=="three" else 0.0
 
-    # ===== Per-stage sliders (if 2/3 stage) =====
-    if stage_choice != "single":
-        s1, s2, s3 = st.columns([1,1,1])
-        with s1: r1 = st.slider(t("s_recovery",lang).format(1), 10, 85, 60) / 100.0
-        with s2: r2 = st.slider(t("s_recovery",lang).format(2), 10, 85, 50) / 100.0
-        with s3: r3 = st.slider(t("s_recovery",lang).format(3), 10, 85, 40) / 100.0 if stage_choice=="three" else 0.0
+            pcol1, pcol2, pcol3 = st.columns([1,1,1])
+            with pcol1: p1_tds = st.number_input(t("s_perm_tds",lang).format(1), min_value=0.0, value=float(product_tds), key="p1_tds")
+            with pcol2: p2_tds = st.number_input(t("s_perm_tds",lang).format(2), min_value=0.0, value=float(product_tds), key="p2_tds")
+            with pcol3: p3_tds = st.number_input(t("s_perm_tds",lang).format(3), min_value=0.0, value=float(product_tds), key="p3_tds") if stage_choice=="three" else float(product_tds)
+        else:
+            r1=r2=r3=0.0; p1_tds=p2_tds=p3_tds=float(product_tds)
 
-        pcol1, pcol2, pcol3 = st.columns([1,1,1])
-        with pcol1: p1_tds = st.number_input(t("s_perm_tds",lang).format(1), min_value=0.0, value=float(product_tds), key="p1_tds")
-        with pcol2: p2_tds = st.number_input(t("s_perm_tds",lang).format(2), min_value=0.0, value=float(product_tds), key="p2_tds")
-        with pcol3: p3_tds = st.number_input(t("s_perm_tds",lang).format(3), min_value=0.0, value=float(product_tds), key="p3_tds") if stage_choice=="three" else float(product_tds)
-    else:
-        r1=r2=r3=0.0; p1_tds=p2_tds=p3_tds=float(product_tds)
+        # Per-vessel inputs (inside the form, BEFORE results)
+        def vessel_inputs(label: str, default_count: int, key_prefix: str):
+            st.markdown(f"<div class='section-title'>{t('vessel_hdr',lang).format(label)}</div>", unsafe_allow_html=True)
+            st.markdown("<div class='card'>", unsafe_allow_html=True)
+            vcount = st.slider(t("vessel_count",lang).format(label), 1, 100, default_count, key=f"{key_prefix}_count")
+            page_size=10; pages=(vcount+page_size-1)//page_size
+            page = st.number_input(t("page",lang), 1, max(1,pages), 1, key=f"{key_prefix}_page")
+            start=(page-1)*page_size; end=min(start+page_size, vcount)
+            cols = st.columns(5)
+            vals=[0.0]*vcount
+            for i in range(start,end):
+                with cols[i%5]:
+                    vals[i] = st.number_input(f"{label} V{i+1} TDS", min_value=0.0, value=0.0, step=1.0, key=f"{key_prefix}_v{i+1}")
+            st.markdown("</div>", unsafe_allow_html=True)
+            return vals
 
-    # ===== Compute core & max output =====
-    reject_flow = reject_flow_in if reject_flow_in > 0 else max(feed_flow - product_flow, 0.0)
-    core = compute_core(feed_tds, product_tds, feed_flow, product_flow, reject_flow,
-                        temperature_c, hp_out_bar, brine_bar, perm_bp_bar)
-    LPM_TO_M3D = 1.44; prod_m3d = product_flow * LPM_TO_M3D; core["prod_m3d"]=round(prod_m3d,2)
-    qp_max, qr_at_max, rej_tds_at_max = compute_max_safe_output(feed_tds, product_tds, feed_flow, cf_limit)
+        if stage_choice == "single":
+            v_s1 = vessel_inputs(t("s1",lang), 6, "s1"); v_s2=[]; v_s3=[]
+        elif stage_choice == "two":
+            v_s1 = vessel_inputs(t("s1",lang), 6, "s1"); v_s2 = vessel_inputs(t("s2",lang), 3, "s2"); v_s3=[]
+        else:
+            v_s1 = vessel_inputs(t("s1",lang), 6, "s1"); v_s2 = vessel_inputs(t("s2",lang), 3, "s2"); v_s3 = vessel_inputs(t("s3",lang), 2, "s3")
+
+        # ---- Calculate button (gates all outputs) ----
+        submitted = st.form_submit_button(t("calc",lang), type="primary")
+
+    # ===== If not calculated yet, show a hint and stop =====
+    if not submitted and not st.session_state.last_calc:
+        st.info("Fill all inputs and click *Calculate* to see professional results.")
+        return
+
+    # ===== Compute (on submit) =====
+    if submitted:
+        reject_flow = reject_flow_in if reject_flow_in > 0 else max(feed_flow - product_flow, 0.0)
+        core = compute_core(feed_tds, product_tds, feed_flow, product_flow, reject_flow,
+                            temperature_c, hp_out_bar, brine_bar, perm_bp_bar)
+        LPM_TO_M3D = 1.44; prod_m3d = product_flow * LPM_TO_M3D; core["prod_m3d"]=round(prod_m3d,2)
+        qp_max, qr_at_max, rej_tds_at_max = compute_max_safe_output(feed_tds, product_tds, feed_flow, cf_limit)
+
+        # store snapshot for rerender on page switches
+        st.session_state.last_calc = {
+            "core":core, "qp_max":qp_max, "qr_at_max":qr_at_max, "rej_tds_at_max":rej_tds_at_max,
+            "meta": dict(plant_name=plant_name, site_name=site_name, capacity=capacity,
+                         temperature_c=temperature_c, stage_choice=stage_choice,
+                         feed_tds=feed_tds, product_tds=product_tds, feed_flow=feed_flow,
+                         product_flow=product_flow, reject_flow=reject_flow,
+                         hp_out_bar=hp_out_bar, brine_bar=brine_bar, perm_bp_bar=perm_bp_bar,
+                         v_s1=v_s1, v_s2=v_s2, v_s3=v_s3, cf_limit=cf_limit)
+        }
+
+    # ===== Use last calculation to render results =====
+    data = st.session_state.last_calc
+    core = data["core"]; qp_max=data["qp_max"]; cf_limit = data["meta"]["cf_limit"]
+    reject_flow = data["meta"]["reject_flow"]; stage_choice = data["meta"]["stage_choice"]
+    plant_name = data["meta"]["plant_name"]; site_name=data["meta"]["site_name"]; capacity=data["meta"]["capacity"]
+    temperature_c=data["meta"]["temperature_c"]
+    feed_tds=data["meta"]["feed_tds"]; product_tds=data["meta"]["product_tds"]
+    feed_flow=data["meta"]["feed_flow"]; product_flow=data["meta"]["product_flow"]
+    hp_out_bar=data["meta"]["hp_out_bar"]; brine_bar=data["meta"]["brine_bar"]; perm_bp_bar=data["meta"]["perm_bp_bar"]
+    v_s1=data["meta"]["v_s1"]; v_s2=data["meta"]["v_s2"]; v_s3=data["meta"]["v_s3"]
 
     # ===== Quick tiles =====
     k0 = st.columns(6)
@@ -469,44 +501,19 @@ def app_page():
     with k2[2]: st.metric(t("pi_perm",lang), f"{core['pi_perm']:.2f}")
     with k2[3]: st.metric(t("dpi",lang),     f"{core['d_pi']:.2f}")
     with k2[4]: st.metric(t("ndp",lang),     f"{core['ndp']:.2f}")
-    with k2[5]: st.metric(t("prod",lang),    f"{core['prod_m3d']:.2f}")
+    with k2[5]: st.metric(t("prod",lang),    f"{(product_flow*1.44):.2f}")
 
-    # ===== Plant Condition block =====
-    score   = health_score(core)
-    cond    = plant_condition_label(score)
-    summary = one_line_summary(core)
-    actions = top_actions(core)
-    cond_css = "good" if cond=="Good" else ("ok" if cond in ("OK","Average") else "bad")
-    st.markdown(f"<div class='section-title'>Plant Condition</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='card {cond_css}'><b>{cond}</b> — Health Score: {score}/100</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='card'><b>Summary</b><div class='note'>{summary}.</div></div>", unsafe_allow_html=True)
-    st.markdown("<div class='card'><b>Top Actions</b><div class='note'>"
-                + "<br>".join("• " + a for a in actions) + "</div></div>", unsafe_allow_html=True)
+    # ===== Overall status + Notes =====
+    st.markdown(f"<div class='section-title'>{t('overall',lang)}</div>", unsafe_allow_html=True)
+    status, reasons = evaluate_status(core)
+    status_box = "good" if status=="Good" else ("ok" if status=="OK" else "bad")
+    overall = overall_text(status)
+    st.markdown(f"<div class='card {status_box}'><b>{overall}</b> — {t('status_hdr',lang)}: {status}</div>", unsafe_allow_html=True)
 
-    # ===== Per-vessel inputs =====
-    def vessel_inputs(label: str, default_count: int, key_prefix: str):
-        st.markdown(f"<div class='section-title'>{t('vessel_hdr',lang).format(label)}</div>", unsafe_allow_html=True)
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        vcount = st.slider(t("vessel_count",lang).format(label), 1, 100, default_count, key=f"{key_prefix}_count")
-        page_size=10; pages=(vcount+page_size-1)//page_size
-        page = st.number_input(t("page",lang), 1, max(1,pages), 1, key=f"{key_prefix}_page")
-        start=(page-1)*page_size; end=min(start+page_size, vcount)
-        cols = st.columns(5)
-        vals=[0.0]*vcount
-        for i in range(start,end):
-            with cols[i%5]:
-                vals[i] = st.number_input(f"{label} V{i+1} TDS", min_value=0.0, value=0.0, step=1.0, key=f"{key_prefix}_v{i+1}")
-        st.markdown("</div>", unsafe_allow_html=True)
-        return vals
+    notes = make_notes(core, qp_max, cf_limit)
+    st.markdown(f"<div class='card'><b>{t('notes',lang)}</b><div class='note'>" + "<br>".join("• "+n for n in notes) + "</div></div>", unsafe_allow_html=True)
 
-    if stage_choice == "single":
-        v_s1 = vessel_inputs(t("s1",lang), 6, "s1"); v_s2=[]; v_s3=[]
-    elif stage_choice == "two":
-        v_s1 = vessel_inputs(t("s1",lang), 6, "s1"); v_s2 = vessel_inputs(t("s2",lang), 3, "s2"); v_s3=[]
-    else:
-        v_s1 = vessel_inputs(t("s1",lang), 6, "s1"); v_s2 = vessel_inputs(t("s2",lang), 3, "s2"); v_s3 = vessel_inputs(t("s3",lang), 2, "s3")
-
-    # ===== Per-vessel table =====
+    # ===== Per-vessel table (derived from entered values) =====
     def stage_reject_tds(qf, feed_ppm, rec_frac, perm_ppm):
         qp=qf*rec_frac; qr=max(qf-qp,0.0); tds_r=(feed_ppm*qf - perm_ppm*qp)/qr if qr>0 else feed_ppm; return tds_r, qp, qr
 
@@ -518,7 +525,7 @@ def app_page():
                 rej=(stage_feed_ppm-tv)/stage_feed_ppm*100.0
                 vessel_rows.append({"Stage":"S1",t("vessel",lang):i,t("out_ppm",lang):tv,t("rej_pct",lang):rej,t("pass_pct",lang):100-rej})
     elif stage_choice == "two":
-        tds_r1, qp1, qr1 = stage_reject_tds(feed_flow, feed_tds, r1, p1_tds)
+        tds_r1, qp1, qr1 = stage_reject_tds(feed_flow, feed_tds, 0.6, product_tds)
         for i,tv in enumerate(v_s1,1):
             if 0 < tv <= feed_tds:
                 rej=(feed_tds-tv)/feed_tds*100.0
@@ -528,8 +535,8 @@ def app_page():
                 rej=(tds_r1-tv)/tds_r1*100.0
                 vessel_rows.append({"Stage":"S2",t("vessel",lang):i,t("out_ppm",lang):tv,t("rej_pct",lang):rej,t("pass_pct",lang):100-rej})
     else:
-        tds_r1, qp1, qr1 = stage_reject_tds(feed_flow, feed_tds, r1, p1_tds)
-        tds_r2, qp2, qr2 = stage_reject_tds(qr1, tds_r1, r2, p2_tds)
+        tds_r1, qp1, qr1 = stage_reject_tds(feed_flow, feed_tds, 0.6, product_tds)
+        tds_r2, qp2, qr2 = stage_reject_tds(qr1, tds_r1, 0.5, product_tds)
         for i,tv in enumerate(v_s1,1):
             if 0 < tv <= feed_tds:
                 rej=(feed_tds-tv)/feed_tds*100.0
@@ -550,7 +557,7 @@ def app_page():
         st.markdown(f"<div class='section-title'>{t('per_vessel',lang)}</div>", unsafe_allow_html=True)
         st.dataframe(df_vessels, use_container_width=True, height=280)
 
-    # ===== Save row =====
+    # ===== Save & Exports =====
     s1, s2 = st.columns([1,4])
     with s1:
         if st.button("💾 "+t("save",lang), type="primary"):
@@ -570,14 +577,179 @@ def app_page():
                 )
                 st.success(t("saved",lang))
 
-    # ===== Exports =====
-    export_section(
-        core, plant_name, site_name, capacity, temperature_c, stage_choice,
-        feed_tds, product_tds, feed_flow, product_flow, reject_flow,
-        hp_out_bar, brine_bar, perm_bp_bar, df_vessels, qp_max, cf_limit,
-        extra={"score": score, "condition": cond, "summary": summary, "actions": actions}
+    export_section(core, plant_name, site_name, capacity, temperature_c, stage_choice,
+                   feed_tds, product_tds, feed_flow, product_flow, reject_flow,
+                   hp_out_bar, brine_bar, perm_bp_bar, df_vessels, qp_max, cf_limit)
+    # =================== Exports (Excel + PDF) ===================
+def export_section(core, plant_name, site_name, capacity, temperature_c, stage_choice,
+                   feed_tds, product_tds, feed_flow, product_flow, reject_flow,
+                   hp_out_bar, brine_bar, perm_bp_bar, df_vessels, qp_max, cf_limit):
+    lang = st.session_state.lang
+
+    status, reasons = evaluate_status(core)
+    overall = overall_text(status)
+    status_text = f"{overall} — {status}"
+    if reasons: status_text += " — " + "; ".join(reasons[:6])
+
+    display_stage = t(stage_choice, lang)
+    df_inputs = pd.DataFrame({
+        "Parameter":[t("plant_name",lang),t("site_name",lang),t("capacity",lang),t("temp",lang),t("stage_type",lang),
+                     t("feed_tds",lang),t("perm_tds",lang),t("feed_flow",lang),t("perm_flow",lang),t("rej_flow",lang),
+                     t("hp",lang),t("brine",lang),t("perm_bp",lang)],
+        "Value":[plant_name,site_name,capacity,temperature_c,display_stage,feed_tds,product_tds,
+                 feed_flow,product_flow,reject_flow,hp_out_bar,brine_bar,perm_bp_bar]
+    })
+
+    notes = make_notes(core, qp_max, cf_limit)
+
+    df_outputs = pd.DataFrame({
+        "KPI":[
+            "Performance Status",
+            "Reject Flow (LPM)",
+            t("max_out",lang)+f" (CF≤{cf_limit:.1f})",
+            t("recovery",lang),t("rejection",lang),t("salt_pass",lang),t("reject_tds",lang),t("cf",lang),
+            t("mb",lang),t("dp",lang),t("pi_feed",lang),t("pi_perm",lang),t("dpi",lang),t("ndp",lang),t("prod",lang),
+            t("notes",lang)
+        ],
+        "Value":[
+            status_text,
+            core["reject_flow"],
+            qp_max,
+            core["recovery"],core["rejection"],core["salt_pass"],core["reject_tds"],core["cf"],
+            core["mb_error"],core["dP"],core["pi_feed"],core["pi_perm"],core["d_pi"],core["ndp"],core["prod_m3d"],
+            " | ".join(notes)
+        ]
+    })
+
+    ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    excel_buf = BytesIO()
+    with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
+        wb = writer.book
+        ws = wb.add_worksheet("Report")
+        writer.sheets["Report"] = ws
+
+        title = wb.add_format({"bold":True,"font_size":16,"font_color":"#1f6feb"})
+        hdr   = wb.add_format({"bold":True,"bg_color":"#E6F0FF","border":1})
+        box   = wb.add_format({"border":1})
+        num2  = wb.add_format({"num_format":"0.00","border":1})
+
+        ws.set_column(0,0,32)
+        ws.set_column(1,1,22)
+        ws.set_column(3,8,18)
+
+        row = 0
+        ws.merge_range(row,0,row,4,"LeeWave – RO Run Report", title)
+        row += 2
+
+        ws.write(row,0,t("inputs",lang),hdr); row += 1
+        ws.write_row(row,0,["Parameter","Value"],hdr); row += 1
+        for p,v in df_inputs.itertuples(index=False):
+            ws.write(row,0,p,box)
+            if isinstance(v,(int,float)): ws.write_number(row,1,float(v),num2)
+            else: ws.write(row,1,str(v),box)
+            row += 1
+        row += 1
+
+        ws.write(row,0,t("outputs",lang),hdr); row += 1
+        kpi_start = row
+        ws.write_row(row,0,["KPI","Value"],hdr); row += 1
+        for k,v in df_outputs.itertuples(index=False):
+            ws.write(row,0,k,box)
+            if isinstance(v,(int,float)): ws.write_number(row,1,float(v),num2)
+            else: ws.write(row,1,str(v),box)
+            row += 1
+        kpi_end = row - 1
+        row += 1
+
+        ws.write(row,0,t("per_vessel",lang),hdr); row += 1
+        if df_vessels.empty:
+            ws.write(row,0,t("no_vessels",lang)); row += 1
+        else:
+            ws.write_row(row,0,list(df_vessels.columns),hdr); row += 1
+            for _,r in df_vessels.iterrows():
+                ws.write(row,0,str(r["Stage"]),box)
+                ws.write_number(row,1,float(r[t("vessel",lang)]),box)
+                ws.write_number(row,2,float(r[t("out_ppm",lang)]),num2)
+                ws.write_number(row,3,float(r[t("rej_pct",lang)]),num2)
+                ws.write_number(row,4,float(r[t("pass_pct",lang)]),num2)
+                row += 1
+
+        chart = wb.add_chart({"type":"column"})
+        chart.add_series({
+            "name":"KPIs",
+            "categories":["Report",kpi_start+1,0,kpi_end,0],
+            "values":["Report",kpi_start+1,1,kpi_end,1],
+        })
+        chart.set_title({"name":"Main KPIs"})
+        chart.set_legend({"position":"none"})
+        chart.set_size({"width":520,"height":300})
+        ws.insert_chart(kpi_start,3,chart)
+
+    st.download_button(
+        t("export_excel",lang),
+        data=excel_buf.getvalue(),
+        file_name=f"{plant_name}_{ts_str}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-    # =================== History / Admin / Help ===================
+
+    with st.expander("📄 PDF"):
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.pdfgen import canvas
+            from reportlab.lib.units import cm
+            from reportlab.lib.colors import Color
+
+            buf = BytesIO()
+            c = canvas.Canvas(buf, pagesize=A4)
+            w, h = A4
+
+            blue = Color(31/255,111/255,235/255)
+            c.setFillColor(blue)
+            c.rect(0, h-1.2*cm, w, 1.2*cm, fill=1, stroke=0)
+            c.setFillColorRGB(1,1,1)
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(1.5*cm, h-0.8*cm, "LeeWave — RO Run Report")
+
+            y = h - 2.2*cm
+            def line(txt, dy=14, bold=False):
+                nonlocal y
+                c.setFont("Helvetica-Bold" if bold else "Helvetica", 11 if bold else 10)
+                c.setFillColorRGB(0,0,0)
+                c.drawString(2*cm, y, str(txt))
+                y -= dy
+
+            line(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 12)
+            line(t("inputs",lang), 16, True)
+            for p,v in df_inputs.itertuples(index=False):
+                line(f"{p}: {v}")
+
+            line(t("outputs",lang), 16, True)
+            line("Performance: " + (overall_text(evaluate_status(core)[0])))
+            for k in ["Reject Flow (LPM)", t("max_out",lang)+f" (CF≤{cf_limit:.1f})",
+                      t("recovery",lang), t("rejection",lang), t("salt_pass",lang),
+                      t("reject_tds",lang), t("cf",lang), t("mb",lang),
+                      t("dp",lang), t("pi_feed",lang), t("pi_perm",lang), t("dpi",lang), t("ndp",lang), t("prod",lang)]:
+                v = df_outputs[df_outputs["KPI"]==k]["Value"].values
+                if len(v):
+                    vv=v[0]
+                    if isinstance(vv,(int,float)): line(f"{k}: {vv:.3f}")
+                    else: line(f"{k}: {vv}")
+
+            line(t("notes",lang), 16, True)
+            for n in notes:
+                line("• " + n)
+
+            c.showPage(); c.save()
+            st.download_button(
+                t("export_pdf",lang),
+                data=buf.getvalue(),
+                file_name=f"{plant_name}_{ts_str}.pdf",
+                mime="application/pdf"
+            )
+        except ImportError:
+            st.warning("Install once:  pip install reportlab")
+
+# =================== History / Admin / Help ===================
 def history_page():
     lang = st.session_state.lang
     user = st.session_state.user
@@ -675,219 +847,13 @@ def help_page():
     topbar()
     st.header(t("help",lang))
     st.markdown(f"""
-How to use
-1) Choose {t('stage_type',lang)} → {t('single',lang)}, {t('two',lang)}, {t('three',lang)}.
-2) Fill {t('plant_name',lang)} / {t('site_name',lang)} / {t('capacity',lang)} / {t('temp',lang)}.
-3) Enter TDS, flows, pressures.
-4) Enter {t('per_vessel',lang)} (paged).
-5) Review {t('results',lang)}, *Plant Condition / Health Score, **{t('max_out',lang)}* and {t('flags',lang)}.
-6) {t('save',lang)} to keep in {t('history',lang)}, or export *Excel/PDF*.
-7) If you hit the 5 capacity limit, click *{t('req_more',lang)} to ask admin.
+*How to use (Pro workflow)*
+1) Enter all inputs in the top form (Plant Info, Quality, Flows, Pressures, Vessels).
+2) Click *{t('calc',lang)}* — results and diagnosis will appear.
+3) Review *KPIs, **Overall Plant Status, **Notes, **Max Safe Output*.
+4) Save to *History, or export **Excel/PDF* for sharing.
+5) If you hit the 5-capacity limit, click *{t('req_more',lang)}* from the banner to request more.
 """)
-    # =================== Exports (Excel/PDF) ===================
-def export_section(core, plant_name, site_name, capacity, temperature_c, stage_choice,
-                   feed_tds, product_tds, feed_flow, product_flow, reject_flow,
-                   hp_out_bar, brine_bar, perm_bp_bar, df_vessels, qp_max, cf_limit,
-                   extra=None):
-    lang = st.session_state.lang
-    extra = extra or {}
-
-    # Overall status text
-    status, reasons = evaluate_status(core)
-    overall = overall_text(status)
-    status_text = f"{overall} — {status}"
-    if reasons: status_text += " — " + "; ".join(reasons[:6])
-
-    # -------- Tables for export --------
-    display_stage = t(stage_choice, lang)  # translated label
-    df_inputs = pd.DataFrame({
-        "Parameter":[t("plant_name",lang),t("site_name",lang),t("capacity",lang),t("temp",lang),t("stage_type",lang),
-                     t("feed_tds",lang),t("perm_tds",lang),t("feed_flow",lang),t("perm_flow",lang),t("rej_flow",lang),
-                     t("hp",lang),t("brine",lang),t("perm_bp",lang)],
-        "Value":[plant_name,site_name,capacity,temperature_c,display_stage,feed_tds,product_tds,
-                 feed_flow,product_flow,reject_flow,hp_out_bar,brine_bar,perm_bp_bar]
-    })
-
-    notes = [*top_actions(core)]  # short, actionable notes for the export
-    kpi_block = pd.DataFrame({
-        "KPI":[
-            "Plant Condition",
-            "Health Score (0–100)",
-            "Summary",
-            "Top Actions",
-            "Performance Status",
-            "Reject Flow (LPM)",
-            t("max_out",lang)+f" (CF≤{cf_limit:.1f})",
-            t("recovery",lang),t("rejection",lang),t("salt_pass",lang),t("reject_tds",lang),t("cf",lang),
-            t("mb",lang),t("dp",lang),t("pi_feed",lang),t("pi_perm",lang),t("dpi",lang),t("ndp",lang),t("prod",lang),
-        ],
-        "Value":[
-            extra.get("condition",""),
-            extra.get("score",""),
-            extra.get("summary",""),
-            " | ".join(extra.get("actions",[])),
-            status_text,
-            core["reject_flow"],
-            qp_max,
-            core["recovery"],core["rejection"],core["salt_pass"],core["reject_tds"],core["cf"],
-            core["mb_error"],core["dP"],core["pi_feed"],core["pi_perm"],core["d_pi"],core["ndp"],core["prod_m3d"],
-        ]
-    })
-
-    # -------- Excel (single sheet + KPI chart) --------
-    ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    excel_buf = BytesIO()
-    with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
-        wb = writer.book
-        ws = wb.add_worksheet("Report")
-        writer.sheets["Report"] = ws
-
-        title = wb.add_format({"bold":True,"font_size":16,"font_color":"#1f6feb"})
-        hdr   = wb.add_format({"bold":True,"bg_color":"#E6F0FF","border":1})
-        box   = wb.add_format({"border":1})
-        num2  = wb.add_format({"num_format":"0.00","border":1})
-
-        ws.set_column(0,0,32)
-        ws.set_column(1,1,22)
-        ws.set_column(3,8,18)
-
-        row = 0
-        ws.merge_range(row,0,row,4,"LeeWave – RO Run Report", title)
-        row += 2
-
-        ws.write(row,0,t("inputs",lang),hdr); row += 1
-        ws.write_row(row,0,["Parameter","Value"],hdr); row += 1
-        for p,v in df_inputs.itertuples(index=False):
-            ws.write(row,0,p,box)
-            if isinstance(v,(int,float)): ws.write_number(row,1,float(v),num2)
-            else: ws.write(row,1,str(v),box)
-            row += 1
-        row += 1
-
-        ws.write(row,0,t("outputs",lang),hdr); row += 1
-        kpi_start = row
-        ws.write_row(row,0,["KPI","Value"],hdr); row += 1
-        for k,v in kpi_block.itertuples(index=False):
-            ws.write(row,0,k,box)
-            if isinstance(v,(int,float)): ws.write_number(row,1,float(v),num2)
-            else: ws.write(row,1,str(v),box)
-            row += 1
-        kpi_end = row - 1
-        row += 1
-
-        ws.write(row,0,t("per_vessel",lang),hdr); row += 1
-        if df_vessels.empty:
-            ws.write(row,0,t("no_vessels",lang)); row += 1
-        else:
-            ws.write_row(row,0,list(df_vessels.columns),hdr); row += 1
-            for _,r in df_vessels.iterrows():
-                ws.write(row,0,str(r["Stage"]),box)
-                ws.write_number(row,1,float(r[t("vessel",lang)]),box)
-                ws.write_number(row,2,float(r[t("out_ppm",lang)]),num2)
-                ws.write_number(row,3,float(r[t("rej_pct",lang)]),num2)
-                ws.write_number(row,4,float(r[t("pass_pct",lang)]),num2)
-                row += 1
-
-        chart = wb.add_chart({"type":"column"})
-        chart.add_series({
-            "name":"KPIs",
-            "categories":["Report",kpi_start+1,0,kpi_end,0],
-            "values":["Report",kpi_start+1,1,kpi_end,1],
-        })
-        chart.set_title({"name":"Main KPIs"})
-        chart.set_legend({"position":"none"})
-        chart.set_size({"width":520,"height":300})
-        ws.insert_chart(kpi_start,3,chart)
-
-    st.download_button(
-        t("export_excel",lang),
-        data=excel_buf.getvalue(),
-        file_name=f"{plant_name}_{ts_str}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-    # -------- PDF --------
-    with st.expander("📄 PDF"):
-        try:
-            from reportlab.lib.pagesizes import A4
-            from reportlab.pdfgen import canvas
-            from reportlab.lib.units import cm
-            from reportlab.lib.colors import Color
-
-            buf = BytesIO()
-            c = canvas.Canvas(buf, pagesize=A4)
-            w, h = A4
-
-            # Header bar
-            blue = Color(31/255,111/255,235/255)
-            c.setFillColor(blue)
-            c.rect(0, h-1.2*cm, w, 1.2*cm, fill=1, stroke=0)
-            c.setFillColorRGB(1,1,1)
-            c.setFont("Helvetica-Bold", 14)
-            c.drawString(1.5*cm, h-0.8*cm, "LeeWave — RO Run Report")
-
-            y = h - 2.2*cm
-            def line(txt, dy=14, bold=False):
-                nonlocal y
-                c.setFont("Helvetica-Bold" if bold else "Helvetica", 11 if bold else 10)
-                c.setFillColorRGB(0,0,0)
-                c.drawString(2*cm, y, str(txt))
-                y -= dy
-
-            # Inputs
-            line(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 12)
-            line(t("inputs",lang), 16, True)
-            for p,v in df_inputs.itertuples(index=False):
-                line(f"{p}: {v}")
-
-            # Outputs overview
-            line(t("outputs",lang), 16, True)
-            line(f"Plant Condition: {extra.get('condition','')}")
-            line(f"Health Score: {extra.get('score','')}/100")
-            line("Summary: " + str(extra.get("summary","")))
-            for a in extra.get("actions", [])[:3]:
-                line("• " + a)
-
-            # Key numeric KPIs
-            for k,v in [
-                ("Reject Flow (LPM)", core["reject_flow"]),
-                (t("max_out",lang)+f" (CF≤{cf_limit:.1f})", qp_max),
-                (t("recovery",lang), core["recovery"]),
-                (t("rejection",lang), core["rejection"]),
-                (t("salt_pass",lang), core["salt_pass"]),
-                (t("reject_tds",lang), core["reject_tds"]),
-                (t("cf",lang), core["cf"]),
-                (t("mb",lang), core["mb_error"]),
-                (t("dp",lang), core["dP"]),
-                (t("pi_feed",lang), core["pi_feed"]),
-                (t("pi_perm",lang), core["pi_perm"]),
-                (t("dpi",lang), core["d_pi"]),
-                (t("ndp",lang), core["ndp"]),
-                (t("prod",lang), core["prod_m3d"]),
-            ]:
-                if isinstance(v,(int,float)): line(f"{k}: {v:.3f}")
-                else: line(f"{k}: {v}")
-
-            # Per-vessel (first 25 lines)
-            if not df_vessels.empty:
-                line(t("per_vessel",lang), 16, True)
-                for _,r in df_vessels.head(25).iterrows():
-                    line(f"{r['Stage']} V{int(r[t('vessel',lang)])}: "
-                         f"Out {float(r[t('out_ppm',lang)]):.1f} ppm | "
-                         f"Rej {float(r[t('rej_pct',lang)]):.2f}% | "
-                         f"Pass {float(r[t('pass_pct',lang)]):.2f}%")
-                if len(df_vessels) > 25:
-                    line(f"... +{len(df_vessels)-25} more vessels (see Excel).")
-
-            c.showPage(); c.save()
-            st.download_button(
-                t("export_pdf",lang),
-                data=buf.getvalue(),
-                file_name=f"{plant_name}_{ts_str}.pdf",
-                mime="application/pdf"
-            )
-        except ImportError:
-            st.warning("Install once:  pip install reportlab")
 
 # -------------------- Router --------------------
 if st.session_state.user is None or st.session_state.page == "auth":
