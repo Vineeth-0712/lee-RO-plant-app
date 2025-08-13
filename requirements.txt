@@ -1,0 +1,6 @@
+streamlit
+pandas
+xlsxwriter
+reportlab
+sqlalchemy
+psycopg2-binary
