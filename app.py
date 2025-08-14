@@ -1,866 +1,911 @@
-# =================== LeeWave – RO Plant Calculator Pro (Professional Dashboard) ===================
-import streamlit as st
-import pandas as pd
-import sqlite3
-from io import BytesIO
-from datetime import datetime
+# No electrical inputs. Focused on plant health, quality, hydraulics & maintenance.
+
+import os, io, re, json, smtplib, base64, hashlib, hmac
+from email.mime.text import MIMEText
+from email.utils import formatdate
 from pathlib import Path
-import os
-import math
+from datetime import datetime, date, timedelta
 
-# ---------- Brand ----------
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+# -------------------- optional deps --------------------
+try:
+    from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+except Exception:
+    class SignatureExpired(Exception): ...
+    class BadSignature(Exception): ...
+    class _MiniSerializer:
+        def _init_(self, secret): self.secret = secret.encode()
+        def dumps(self, text, salt=""):
+            msg = (salt + "|" + text).encode()
+            sig = hmac.new(self.secret, msg, hashlib.sha256).digest()
+            return base64.urlsafe_b64encode(msg + b"." + sig).decode()
+        def loads(self, token, salt="", max_age=None):
+            raw = base64.urlsafe_b64decode(token.encode())
+            msg, sig = raw.rsplit(b".", 1)
+            if not hmac.compare_digest(hmac.new(self.secret, msg, hashlib.sha256).digest(), sig):
+                raise BadSignature("bad sig")
+            _salt, text = msg.decode().split("|", 1)
+            if _salt != salt: raise BadSignature("bad salt")
+            return text
+    def URLSafeTimedSerializer(secret): return _MiniSerializer(secret)
+
+try:
+    import bcrypt; BCRYPT_OK = True
+except Exception:
+    bcrypt = None; BCRYPT_OK = False
+
+# Exports
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    REPORTLAB_OK = True
+except Exception:
+    REPORTLAB_OK = False
+
+try:
+    import xlsxwriter  # noqa
+    XLSX_OK = True
+except Exception:
+    XLSX_OK = False
+
+# -------------------- app meta & theme --------------------
 BRAND = "LeeWave"
-PRIMARY_HEX = "#1f6feb"
+PRIMARY_HEX = "#0B7285"   # teal
+ACCENT_HEX  = "#E3FAFC"   # light teal bg
 
-st.set_page_config(page_title=f"{BRAND} – RO Pro", layout="wide")
+APP_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = APP_DIR / "data"
+USERS_DIR = DATA_DIR / "users"
+REPORTS_DIRNAME = "reports"
+for d in [DATA_DIR, USERS_DIR]: d.mkdir(parents=True, exist_ok=True)
+
+st.set_page_config(page_title=f"{BRAND} — RO Dashboard", page_icon="💧", layout="wide")
 st.markdown(
     f"""
     <style>
-      .lw-title {{ text-align:center; color:{PRIMARY_HEX}; font-weight:800; font-size:28px; margin:4px 0 4px; }}
-      .lw-sub   {{ text-align:center; color:#4b5563; font-size:13px; margin-bottom:16px; }}
-      .stButton>button {{ border-radius:10px; padding:0.55rem 1rem; font-weight:600; }}
-      .card {{
-          background:#ffffff; border:1px solid #e5e7eb; border-radius:14px; padding:14px; margin-bottom:12px;
-          box-shadow: 0 1px 2px rgba(0,0,0,0.04);
-      }}
-      .section-title {{ font-weight:700; color:#111827; margin: 2px 0 8px; font-size:16px; }}
-      div[data-testid="stMetricValue"] {{ font-size:1.15rem !important; }}
-      .good  {{ border-left:6px solid #10b981; }}
-      .ok    {{ border-left:6px solid #60a5fa; }}
-      .bad   {{ border-left:6px solid #ef4444; }}
-      .muted {{ color:#6b7280; font-size:12px; }}
-      .note  {{ font-size:13px; color:#374151; line-height:1.35; }}
-      footer {{ visibility:hidden; }}
-      .form-title {{ font-size:14px; color:#374151; font-weight:700; margin-bottom:6px; }}
+      .block-container{{padding-top:0.7rem}}
+      h1,h2,h3,h4{{color:{PRIMARY_HEX}}}
+      .lee-badge{{background:{ACCENT_HEX};border:1px solid #b8f2f7;padding:6px 10px;border-radius:10px;display:inline-block}}
+      .good{{background:#eaf8ef;border-radius:8px;padding:6px 10px}}
+      .warn{{background:#fff8e1;border-radius:8px;padding:6px 10px}}
+      .bad{{background:#fdecea;border-radius:8px;padding:6px 10px}}
+      .muted{{color:#666}}
     </style>
     """,
     unsafe_allow_html=True
 )
-st.markdown(f"<div class='lw-title'>{BRAND} – RO Plant Calculator Pro</div>", unsafe_allow_html=True)
-st.markdown("<div class='lw-sub'>Login • Clean Inputs • Calculate → Results • Executive Summary • Max Output • Excel/PDF • History • Admin</div>", unsafe_allow_html=True)
 
-# ---------- Paths ----------
-APP_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH = str(APP_DIR / "ro.db")
+# -------------------- ENV (reset links) --------------------
+SECRET_KEY   = os.environ.get("SECRET_KEY", "dev-change-me-please")
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8501")
+SMTP_HOST    = os.environ.get("SMTP_HOST", "")
+SMTP_PORT    = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER    = os.environ.get("SMTP_USER", "")
+SMTP_PASS    = os.environ.get("SMTP_PASS", "")
+MAIL_FROM    = os.environ.get("MAIL_FROM", "no-reply@leewave.app")
+ts = URLSafeTimedSerializer(SECRET_KEY)
 
-# ---------- Admin creds (env override in production) ----------
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@ro.local")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Admin123")
-SHOW_ADMIN_HINT = os.environ.get("SHOW_ADMIN_HINT", "0") == "1"
-
-# ---------- Basic i18n ----------
-LANGS = {"en":"English","ar":"العربية","ml":"മലയാളം","hi":"हिन्दी"}
-T = {
-    "en": {
-        "login":"Login","register":"Register","forgot":"Forgot Password",
-        "email":"Email","password":"Password","confirm":"Confirm Password",
-        "create_acc":"Create account","reset":"Reset",
-        "app":"App","history":"History","admin":"Admin","help":"Help",
-        "plant_calc":"RO Plant Performance Calculator",
-        "plant_name":"Plant Name","site_name":"Site Name","capacity":"Capacity (m³/day)","temp":"Temperature (°C)",
-        "feed_tds":"Feed TDS (ppm)","perm_tds":"Product (Permeate) TDS (ppm)",
-        "feed_flow":"Feed Flow (LPM)","perm_flow":"Product Flow (LPM)","rej_flow":"Reject Flow (LPM) [optional]",
-        "hp":"HP Pump Discharge (bar)","brine":"Brine / Reject Pressure (bar)","perm_bp":"Permeate Backpressure (bar)",
-        "stage_type":"Stage Type","single":"Single-stage","two":"Two-stage (series)","three":"Three-stage (series)",
-        "s1":"Stage-1","s2":"Stage-2","s3":"Stage-3",
-        "s_recovery":"Stage-{} Recovery (%)","s_perm_tds":"Stage-{} Permeate TDS (ppm)",
-        "vessel_hdr":"{} — Per-Vessel Outlet TDS (ppm)","vessel_count":"{} — Number of Vessels","page":"Page",
-        "results":"Results – KPIs","status_hdr":"Performance Status",
-        "recovery":"Recovery (%)","rejection":"Overall Rejection (%)","salt_pass":"Salt Passage (%)",
-        "reject_tds":"Reject TDS (ppm est)","cf":"CF (Reject/Feed)","mb":"Mass Balance Error (%)",
-        "dp":"ΔP (bar)","pi_feed":"π Feed (bar)","pi_perm":"π Perm (bar)","dpi":"Δπ (bar)","ndp":"NDP (bar)","prod":"Production (m³/day)",
-        "per_vessel":"Per-Vessel Salt Performance","vessel":"Vessel","out_ppm":"Outlet TDS (ppm)","rej_pct":"Rejection (%)","pass_pct":"Salt Passage (%)",
-        "save":"Save this run","saved":"Run saved to history ✅",
-        "export_excel":"📥 Download Excel report (1 sheet)","export_pdf":"📄 Download PDF report",
-        "flags":"Health Flags","ok":"OK","flag_hi_rec":"Recovery very high (>80%) → scaling risk",
-        "flag_hi_dp":"High ΔP (>4 bar) → fouling/plugging check","flag_low_ndp":"Low NDP (<1 bar) → low driving force","flag_mb":"Mass balance outside ±5% → verify readings",
-        "limit_hit":"You reached your capacity limit (max 5 unique capacities).",
-        "req_more":"📩 Request more capacity","req_label":"Request new total capacity limit",
-        "req_done":"Request sent. Admin will review.","req_pending":"A request is already pending. The admin will review it.",
-        "inputs":"Inputs","outputs":"Outputs (KPIs)","no_vessels":"(no vessel data)",
-        "signed":"Signed in","role":"Role","section":"Section","users":"Users","cap_req":"Capacity Requests (pending)",
-        "filter_plant":"Filter by Plant Name","filter_site":"Filter by Site","export_hist":"📥 Export History (CSV)",
-        "register_ok":"Registered. Please log in.","email_used":"Email already registered.","pwd_mismatch":"Passwords do not match.","need_ep":"Email & password required.","need_en":"Email & new password required.",
-        "pwd_updated":"Password updated. Go to Login.","admin_only":"Admin only.",
-        # NEW labels
-        "overall":"Overall Plant Status","notes":"Notes","max_out":"Max Safe Output (LPM)","scaling_risk":"Scaling Risk",
-        "calc":"Calculate"
-    },
-    "ar": {"login":"تسجيل الدخول","register":"تسجيل","forgot":"نسيت كلمة المرور","app":"التطبيق","history":"السجل","admin":"الإدارة","help":"مساعدة",
-           "plant_calc":"حاسبة أداء محطة RO","plant_name":"اسم المحطة","site_name":"الموقع","capacity":"السعة (م³/يوم)","temp":"الحرارة (°م)",
-           "feed_tds":"TDS التغذية","perm_tds":"TDS المنتج","feed_flow":"تدفق التغذية","perm_flow":"تدفق المنتج","rej_flow":"تدفق الرجيع [اختياري]",
-           "hp":"ضغط المضخة","brine":"ضغط الرجيع","perm_bp":"ضغط رجعي للمنتج","stage_type":"نوع المراحل","single":"مرحلة واحدة","two":"مرحلتان","three":"ثلاث مراحل",
-           "s1":"المرحلة 1","s2":"المرحلة 2","s3":"المرحلة 3","results":"النتائج","status_hdr":"تقييم الأداء",
-           "save":"حفظ","saved":"تم الحفظ","export_excel":"تنزيل Excel","export_pdf":"تنزيل PDF",
-           "flags":"مؤشرات الصحة","ok":"سليم","limit_hit":"تم الوصول للحد","req_more":"طلب سعة أكبر","req_label":"الحد الجديد المطلوب",
-           "calc":"احسب"},
-    "ml": {"login":"ലോഗിൻ","register":"രജിസ്റ്റർ","forgot":"പാസ്‌വേഡ് മറന്നോ","app":"ആപ്പ്","history":"ഹിസ്റ്ററി","admin":"അഡ്മിൻ","help":"ഹെൽപ്പ്",
-           "plant_calc":"RO പ്ലാന്റ് പെർഫോർമൻസ് കാൽക്കുലേറ്റർ","plant_name":"പ്ലാന്റ് പേര്","site_name":"സൈറ്റ്","capacity":"ശേഷി (മീ³/ദിവസം)","temp":"താപനില (°C)",
-           "feed_tds":"ഫീഡ് TDS","perm_tds":"പ്രോഡക്ട് TDS","feed_flow":"ഫീഡ് ഫ്ലോ","perm_flow":"പ്രോഡക്റ്റ് ഫ്ലോ","rej_flow":"റിജക്ട് ഫ്ലോ [ഓപ്ഷണൽ]",
-           "hp":"HP ഡിസ്ചാർജ്","brine":"ബ്രൈൻ പ്രഷർ","perm_bp":"പെർമിയേറ്റ് ബാക്ക്‌പ്രഷർ","stage_type":"സ്റ്റേജ് തരം","single":"സിംഗിൾ","two":"ടു സ്റ്റേജ്","three":"ത്രീ സ്റ്റേജ്",
-           "s1":"സ്റ്റേജ്-1","s2":"സ്റ്റേജ്-2","s3":"സ്റ്റേജ്-3","results":"ഫലം","status_hdr":"പെർഫോർമൻസ് സ്റ്റാറ്റസ്",
-           "save":"റൺ സേവ് ചെയ്യുക","saved":"സേവ് ചെയ്തു","export_excel":"Excel ഡൗൺലോഡ്","export_pdf":"PDF ഡൗൺലോഡ്",
-           "flags":"ഹെൽത്ത് ഫ്ലാഗ്സ്","ok":"OK","limit_hit":"പരിമിതി എത്തിയിരിക്കുന്നു","req_more":"കപ്പാസിറ്റി കൂട്ടാൻ അഭ്യർത്ഥിക്കൂ","req_label":"പുതിയ ലിമിറ്റ്",
-           "calc":"ക്യാലകുലേറ്റ്"},
-    "hi": {"login":"लॉगिन","register":"रजिस्टर","forgot":"पासवर्ड भूल गए","app":"ऐप","history":"इतिहास","admin":"एडमिन","help":"सहायता",
-           "plant_calc":"RO प्लांट परफॉर्मेंस कैलकुलेटर","plant_name":"प्लांट नाम","site_name":"साइट","capacity":"क्षमता (m³/दिन)","temp":"तापमान (°C)",
-           "feed_tds":"फीड TDS","perm_tds":"प्रोडक्ट TDS","feed_flow":"फीड फ्लो","perm_flow":"प्रोडक्ट फ्लो","rej_flow":"रिजेक्ट फ्लो [वैकल्पिक]",
-           "hp":"HP डिस्चार्ज","brine":"ब्राइन प्रेशर","perm_bp":"परम बैकप्रेशर","stage_type":"स्टेज प्रकार","single":"सिंगल","two":"टू-स्टेज","three":"थ्री-स्टेज",
-           "s1":"स्टेज-1","s2":"स्टेज-2","s3":"स्टेज-3","results":"परिणाम","status_hdr":"प्रदर्शन स्थिति",
-           "save":"रन सेव करें","saved":"सेव किया","export_excel":"Excel डाउनलोड","export_pdf":"PDF डाउनलोड",
-           "flags":"हेल्थ फ्लैग","ok":"OK","limit_hit":"सीमा पूरी हो गई","req_more":"क्षमता बढ़ाने का अनुरोध","req_label":"नया लिमिट",
-           "calc":"कैलकुलेट"}
-}
-def t(k, lang): return T.get(lang, T["en"]).get(k, T["en"].get(k, k))
-
-# ---------- DB helpers ----------
-def _connect(): return sqlite3.connect(DB_PATH)
-def _fetchone(q,p=()): con=_connect(); cur=con.cursor(); cur.execute(q,p); r=cur.fetchone(); con.close(); return r
-def _fetchall(q,p=()): con=_connect(); cur=con.cursor(); cur.execute(q,p); r=cur.fetchall(); con.close(); return r
-def _execute(q,p=()):  con=_connect(); cur=con.cursor(); cur.execute(q,p); con.commit(); con.close()
-
-# ---------- DB init/migrate/seed ----------
-def init_db():
-    con=_connect(); cur=con.cursor()
-    cur.execute("""CREATE TABLE IF NOT EXISTS users(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      email TEXT UNIQUE NOT NULL,
-      password TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'user',
-      capacity_limit INTEGER NOT NULL DEFAULT 5,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS capacity_requests(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      requested_capacity INTEGER NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending',
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      FOREIGN KEY(user_id) REFERENCES users(id)
-    )""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS runs(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ts TEXT,
-      user_id INTEGER,
-      plant_name TEXT,
-      site_name TEXT,
-      capacity REAL, temperature REAL,
-      feed_tds REAL, product_tds REAL,
-      feed_flow REAL, product_flow REAL, reject_flow REAL,
-      hp REAL, brine REAL, perm_bp REAL,
-      stage_type TEXT,
-      recovery REAL, rejection REAL, salt_pass REAL,
-      reject_tds REAL, cf REAL, mb_error REAL,
-      dP REAL, pi_feed REAL, pi_perm REAL, d_pi REAL, ndp REAL,
-      prod_m3d REAL,
-      FOREIGN KEY(user_id) REFERENCES users(id)
-    )""")
-    con.commit(); con.close()
-
-def migrate_db():
-    con=_connect(); cur=con.cursor()
-    cur.execute("PRAGMA table_info(runs)"); cols={r[1] for r in cur.fetchall()}
-    needed={"perm_bp":"REAL","stage_type":"TEXT","pi_feed":"REAL","pi_perm":"REAL","d_pi":"REAL","ndp":"REAL","prod_m3d":"REAL","user_id":"INTEGER"}
-    for col,ddl in needed.items():
-        if col not in cols: cur.execute(f"ALTER TABLE runs ADD COLUMN {col} {ddl}")
-    con.commit(); con.close()
-
-def ensure_admin():
-    if not _fetchone("SELECT id FROM users WHERE email=?", (ADMIN_EMAIL,)):
-        _execute("INSERT INTO users(email,password,role,capacity_limit) VALUES(?,?,?,?)",
-                 (ADMIN_EMAIL, ADMIN_PASSWORD, "admin", 999))
-
-init_db(); migrate_db(); ensure_admin()
-# ---------- Session ----------
-if "page" not in st.session_state: st.session_state.page="auth"
-if "user" not in st.session_state: st.session_state.user=None
-if "stage_choice" not in st.session_state: st.session_state.stage_choice="single"   # stable key
-if "lang" not in st.session_state: st.session_state.lang="en"
-if "last_calc" not in st.session_state: st.session_state.last_calc=None  # store last results
-
-# ---------- Core calcs ----------
-def compute_core(feed_tds, product_tds, feed_flow, product_flow, reject_flow_in,
-                 temperature_c, hp_out_bar, brine_bar, perm_bp_bar):
-    reject_flow = reject_flow_in if reject_flow_in>0 else max(feed_flow - product_flow, 0.0)
-    recovery   = (product_flow/feed_flow*100.0) if feed_flow>0 else 0.0
-    rejection  = ((feed_tds - product_tds)/feed_tds*100.0) if feed_tds>0 else 0.0
-    salt_pass  = max(0.0, 100.0 - rejection)
-
-    feed_salt = feed_tds*feed_flow; perm_salt = product_tds*product_flow
-    reject_tds = ((feed_salt - perm_salt)/reject_flow) if reject_flow>0 else 0.0
-    cf = (reject_tds/feed_tds) if feed_tds>0 else 0.0
-    out_mg_min = perm_salt + reject_tds*reject_flow
-    mb_error = ((out_mg_min - feed_salt)/feed_salt*100.0) if feed_salt>0 else 0.0
-
-    temp_factor = 1.0 + 0.02 * (temperature_c - 25.0)/25.0
-    pi_feed = 0.0008*feed_tds*temp_factor; pi_perm=0.0008*product_tds*temp_factor
-    d_pi = max(pi_feed - pi_perm, 0.0)
-
-    dP = max(hp_out_bar - brine_bar, 0.0)
-    feed_avg = (hp_out_bar + brine_bar)/2.0 if (hp_out_bar>0 and brine_bar>0) else hp_out_bar
-    ndp = max(feed_avg - perm_bp_bar - d_pi, 0.0)
-
-    return {"recovery":round(recovery,2),"rejection":round(rejection,2),"salt_pass":round(salt_pass,2),
-            "reject_flow":round(reject_flow,3),"reject_tds":round(reject_tds,2),"cf":round(cf,3),
-            "mb_error":round(mb_error,2),"pi_feed":round(pi_feed,3),"pi_perm":round(pi_perm,3),
-            "d_pi":round(d_pi,3),"dP":round(dP,3),"ndp":round(ndp,3)}
-
-def compute_max_safe_output(feed_tds, product_tds, feed_flow, cf_limit=2.5):
-    """Return (Qp_max_LPM, Qr_LPM, reject_tds_ppm) using mass balance at a CF limit."""
-    if feed_tds <= 0 or feed_flow <= 0: return 0.0, feed_flow, 0.0
-    denom = (product_tds / float(feed_tds)) - cf_limit
-    if denom >= 0:
-        return 0.0, feed_flow, feed_tds
-    qf = float(feed_flow)
-    qp = qf * (1.0 - cf_limit) / denom
-    qp = max(0.0, min(qp, qf))
-    qr = max(qf - qp, 0.0)
-    rej_tds = ((feed_tds*qf - product_tds*qp) / qr) if qr>0 else feed_tds
-    return round(qp,2), round(qr,2), round(rej_tds,2)
-
-def scaling_risk_label(cf):
-    if cf <= 2.0: return "Low"
-    if cf <= 2.5: return "Medium"
-    if cf <= 3.0: return "High"
-    return "Very High"
-
-# ---------- Performance Status ----------
-def evaluate_status(core: dict) -> tuple[str, list[str]]:
-    reasons=[]
-    rec=core["recovery"]; rej=core["rejection"]; cf=core["cf"]; dp=core["dP"]; ndp=core["ndp"]; mbe=abs(core["mb_error"])
-    if rej < 92: reasons.append("Low rejection (<92%)")
-    if cf  > 3:  reasons.append("High concentration factor (>3.0) → scaling risk")
-    if dp  > 4:  reasons.append("High ΔP (>4 bar) → fouling/plugging suspected")
-    if ndp < 1:  reasons.append("Low NDP (<1 bar) → weak driving force")
-    if mbe > 8:  reasons.append("Mass balance error (>±8%) → verify meters/readings")
-    if rec > 80: reasons.append("Very high recovery (>80%) → scaling risk")
-    if rec < 25: reasons.append("Very low recovery (<25%) → capacity under-used")
-
-    if (rej >= 95 and cf <= 2.5 and 1 <= ndp and dp <= 3 and mbe <= 5 and 35 <= rec <= 75):
-        status="Good"
-    elif (rej >= 92 and cf <= 3.0 and ndp >= 1.0 and dp <= 4 and mbe <= 8):
-        status="OK"
-    else:
-        status="Needs attention"
-
-    if status != "Needs attention":
-        reasons = [r for r in reasons if "recovery" not in r.lower()]
-    return status, reasons
-
-def overall_text(status):
-    return "Good" if status=="Good" else ("Average" if status=="OK" else "Poor")
-
-def make_notes(core, max_qp, cf_limit):
-    notes=[]
-    if core["rejection"] >= 95: notes.append("Product quality is good (rejection ≥95%).")
-    elif core["rejection"] >= 92: notes.append("Product quality acceptable (rejection ≥92%).")
-    else: notes.append("Product quality low — check membranes / fouling.")
-
-    rec_now = core["recovery"]
-    notes.append(f"Current recovery {rec_now:.1f}%. Max safe output (CF≤{cf_limit}) ≈ {max_qp:.0f} LPM.")
-
-    if core["dP"] > 4: notes.append("ΔP high — possible fouling/plugging.")
-    else: notes.append("ΔP normal.")
-
-    if core["ndp"] < 1: notes.append("NDP low — increase driving force (check pressures/backpressure).")
-    else: notes.append("NDP OK.")
-
-    if abs(core["mb_error"]) > 5: notes.append("Mass balance off (>±5%) — verify meters.")
-    else: notes.append("Mass balance OK.")
-
-    risk = scaling_risk_label(core["cf"])
-    notes.append(f"Scaling risk: {risk} (CF={core['cf']:.2f}).")
-    return notes[:6]
-
-# ---------- Auth ----------
-def auth_login(email, password):
-    row=_fetchone("SELECT id,email,role,capacity_limit FROM users WHERE email=? AND password=?",(email.strip(),password))
-    if row:
-        st.session_state.user={"id":row[0],"email":row[1],"role":row[2],"capacity_limit":row[3]}
-        st.session_state.page="app"; st.rerun()
-    else: st.error("Invalid credentials.")
-
-def auth_register(email, password):
+# -------------------- Password helpers --------------------
+def _hash_bcrypt(pw: str) -> str: return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+def _verify_bcrypt(pw: str, hashed: str) -> bool:
+    try: return bcrypt.checkpw(pw.encode(), hashed.encode())
+    except Exception: return False
+def _hash_pbkdf2(pw: str) -> str:
+    salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt, 100_000)
+    return "pbkdf2$" + base64.b64encode(salt + dk).decode()
+def _verify_pbkdf2(pw: str, hashed: str) -> bool:
     try:
-        _execute("INSERT INTO users(email,password,role,capacity_limit) VALUES(?,?,?,?)",(email.strip(),password,"user",5))
-        st.success(t("register_ok", st.session_state.lang))
-    except sqlite3.IntegrityError:
-        st.error(t("email_used", st.session_state.lang))
+        b = base64.b64decode(hashed.split("pbkdf2$")[1].encode())
+        salt, dk = b[:16], b[16:]
+        dk2 = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt, 100_000)
+        return hmac.compare_digest(dk, dk2)
+    except Exception: return False
+def hash_password(pw: str) -> str: return _hash_bcrypt(pw) if BCRYPT_OK else _hash_pbkdf2(pw)
+def verify_password(pw: str, hashed: str) -> bool:
+    if hashed.startswith("pbkdf2$"): return _verify_pbkdf2(pw, hashed)
+    return _verify_bcrypt(pw, hashed) if BCRYPT_OK else False
 
-def auth_reset(email, new_pwd):
-    _execute("UPDATE users SET password=? WHERE email=?", (new_pwd, email.strip()))
-    st.success(t("pwd_updated", st.session_state.lang))
+# -------------------- Users DB --------------------
+USERS_DB_PATH = DATA_DIR / "users.json"
+def _default_users():
+    return {
+        "users": {
+            "admin@leewave.app": {
+                "password_hash": hash_password("Admin123"),
+                "role": "admin", "status": "active", "created": str(date.today()),
+                "name": "Admin", "capacity_quota": 9999, "capacities_used": []
+            }
+        },
+        "requests": []
+    }
+def save_users(obj: dict): USERS_DB_PATH.write_text(json.dumps(obj, indent=2))
+def load_users() -> dict:
+    if not USERS_DB_PATH.exists(): save_users(_default_users())
+    try: return json.loads(USERS_DB_PATH.read_text())
+    except Exception:
+        save_users(_default_users()); return json.loads(USERS_DB_PATH.read_text())
 
-def topbar():
-    lang = st.selectbox("Language / اللغة / ഭാഷ / भाषा", list(LANGS.keys()),
-                        format_func=lambda k: LANGS[k], index=list(LANGS.keys()).index(st.session_state.lang))
-    if lang != st.session_state.lang:
-        st.session_state.lang = lang; st.rerun()
-    st.markdown(f"{t('signed',lang)}:** {st.session_state.user['email']}  •  {t('role',lang)}: {st.session_state.user['role']}")
-    labels=[t('app',lang),t('history',lang),t('admin',lang),t('help',lang)]
-    choice = st.radio(t('section',lang), labels, horizontal=True)
-    mapping = {t('app',lang):'app', t('history',lang):'history', t('admin',lang):'admin', t('help',lang):'help'}
-    target = mapping.get(choice,'app')
-    if st.session_state.page != target: st.session_state.page=target; st.rerun()
+def normalize_email(e: str) -> str: return (e or "").strip().lower()
+def email_safe(e: str) -> str: return re.sub(r"[^a-zA-Z0-9_.-]+", "_", normalize_email(e))
 
-# ---------- Capacity helpers ----------
-def user_capacity_values(user_id:int):
-    rows=_fetchall("SELECT DISTINCT capacity FROM runs WHERE user_id=? ORDER BY capacity",(user_id,))
-    return [r[0] for r in rows]
+def user_dir(email: str) -> Path:
+    d = USERS_DIR / email_safe(email)
+    d.mkdir(parents=True, exist_ok=True)
+    for sub in ["daily","weekly","monthly"]:
+        (d / REPORTS_DIRNAME / sub).mkdir(parents=True, exist_ok=True)
+    return d
 
-def user_can_use_capacity(user:dict, cap:float)->tuple[bool,str]:
-    used=user_capacity_values(user["id"])
-    if cap in used: return True, f"Using existing capacity {cap} m³/d (used {len(used)}/{user['capacity_limit']})."
-    if len(used) < int(user["capacity_limit"]): return True, f"Added capacity {cap} m³/d (now {len(used)+1}/{user['capacity_limit']})."
-    return False, t("limit_hit", st.session_state.lang)
+def set_user_status(email: str, status: str):
+    db = load_users(); u = db["users"].get(normalize_email(email))
+    if not u: return False
+    u["status"]=status; save_users(db); return True
 
-def submit_capacity_request(user_id: int, requested_limit: int) -> str:
-    row = _fetchone("SELECT id FROM capacity_requests WHERE user_id=? AND status='pending' ORDER BY id DESC LIMIT 1",(user_id,))
-    if row: return t("req_pending", st.session_state.lang)
-    _execute("INSERT INTO capacity_requests(user_id, requested_capacity, status) VALUES (?,?,?)",
-             (user_id, int(requested_limit), "pending"))
-    return t("req_done", st.session_state.lang)
-def auth_page():
-    lang = st.session_state.lang
-    st.title(f"{BRAND} {t('login',lang)}")
-    choice = st.radio("", [t("login",lang), t("register",lang), t("forgot",lang)], horizontal=True)
-    if choice == t("login",lang):
-        email = st.text_input(t("email",lang))
-        pwd   = st.text_input(t("password",lang), type="password")
-        if st.button(t("login",lang), type="primary"): auth_login(email, pwd)
-        if SHOW_ADMIN_HINT: st.info(f"Admin: {ADMIN_EMAIL} / {ADMIN_PASSWORD}")
-    elif choice == t("register",lang):
-        email = st.text_input(t("email",lang))
-        p1 = st.text_input(t("password",lang), type="password")
-        p2 = st.text_input(t("confirm",lang), type="password")
-        if st.button(t("create_acc",lang), type="primary"):
-            if not email or not p1: st.error(t("need_ep",lang))
-            elif p1!=p2: st.error(t("pwd_mismatch",lang))
-            else: auth_register(email,p1)
+def add_capacity_request(email: str, requested_extra: int = 10, reason: str = ""):
+    db = load_users()
+    db["requests"].append({
+        "email": normalize_email(email),
+        "requested_extra": int(requested_extra),
+        "reason": reason.strip(),
+        "status": "pending",
+        "ts": datetime.now().isoformat(timespec="seconds"),
+    })
+    save_users(db)
+
+# -------------------- Email helper --------------------
+def send_reset_email(to_email: str, reset_link: str) -> bool:
+    if not (SMTP_HOST and SMTP_USER and SMTP_PASS and MAIL_FROM):
+        st.info(f"🔗 Reset link (SMTP not configured): {reset_link}"); return True
+    msg = MIMEText(f"Reset your {BRAND} password:\n{reset_link}\n(Link valid ~30 min)", "plain", "utf-8")
+    msg["Subject"] = f"{BRAND} — Reset your password"; msg["From"]=MAIL_FROM; msg["To"]=to_email
+    msg["Date"] = formatdate(localtime=True)
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
+            s.starttls(); s.login(SMTP_USER, SMTP_PASS); s.sendmail(MAIL_FROM, [to_email], msg.as_string())
+        return True
+    except Exception as e:
+        st.error(f"Email send failed: {e}"); return False
+
+# -------------------- Session & Auth --------------------
+if "authed" not in st.session_state:
+    st.session_state.authed=False; st.session_state.user_email=None; st.session_state.user_role=None
+if "login_attempts" not in st.session_state: st.session_state.login_attempts=0
+if "lock_until" not in st.session_state: st.session_state.lock_until=None
+def is_locked(): lu=st.session_state.lock_until; return (lu is not None) and (datetime.now()<lu)
+
+def register_view():
+    st.title("Create your account")
+    with st.form("register"):
+        email = st.text_input("Email"); name = st.text_input("Name (optional)")
+        pw = st.text_input("Password", type="password"); pw2 = st.text_input("Confirm Password", type="password")
+        ok = st.form_submit_button("Register")
+    if ok:
+        e = normalize_email(email)
+        if not re.match(r"^[^@]+@[^@]+\.[^@]+$", e): st.error("Invalid email."); return
+        if len(pw)<8 or not re.search(r"\d", pw): st.error("Password must be ≥ 8 characters and include a number."); return
+        if pw!=pw2: st.error("Passwords do not match."); return
+        db=load_users()
+        if e in db["users"]: st.error("Email already registered."); return
+        db["users"][e] = {
+            "password_hash": hash_password(pw), "role":"user", "status":"active",
+            "created": str(date.today()), "name": name.strip() or e, "capacity_quota": 5, "capacities_used":[]
+        }
+        save_users(db); user_dir(e); st.success("Registered. You can sign in now.")
+
+def reset_password_view(token: str):
+    try: email = ts.loads(token, salt="reset", max_age=1800)
+    except SignatureExpired: st.error("Reset link expired."); return
+    except BadSignature: st.error("Invalid reset link."); return
+    st.title("Set a new password")
+    with st.form("set_new_pw"):
+        pw = st.text_input("New Password", type="password"); pw2 = st.text_input("Confirm New Password", type="password")
+        ok = st.form_submit_button("Update Password")
+    if ok:
+        if len(pw)<8 or not re.search(r"\d", pw): st.error("Password must be ≥ 8 characters and include a number."); return
+        if pw!=pw2: st.error("Passwords do not match."); return
+        db=load_users(); u=db["users"].get(normalize_email(email))
+        if not u: st.error("User not found."); return
+        u["password_hash"]=hash_password(pw); db["users"][normalize_email(email)]=u; save_users(db)
+        st.success("Password updated. Please sign in.")
+
+def login_view():
+    st.title("LeeWave RO • Sign in")
+    qp = st.query_params
+    if "reset_token" in qp: reset_password_view(qp["reset_token"]); st.stop()
+    if is_locked(): st.error("Too many attempts. Try again later."); st.stop()
+    with st.form("login"):
+        email_in = st.text_input("Email", placeholder="you@company.com")
+        pwd_in   = st.text_input("Password", type="password", placeholder="••••••••")
+        c1,c2,c3 = st.columns([1,1,1])
+        ok = c1.form_submit_button("Sign in")
+        go_register = c2.form_submit_button("Register")
+        forgot = c3.form_submit_button("Forgot password?")
+    if go_register:
+        register_view(); st.stop()
+    if forgot:
+        enter = st.text_input("Enter your registered email", key="reset_email")
+        if st.button("Send reset link"):
+            e = normalize_email(enter); db=load_users(); u=db["users"].get(e)
+            if not u: st.error("No account found for that email.")
+            elif u.get("status")=="disabled": st.error("Account disabled. Contact admin.")
+            else:
+                token = ts.dumps(e, salt="reset"); link = f"{APP_BASE_URL}?reset_token={token}"
+                if send_reset_email(e, link): st.success("Reset link sent (also shown above if SMTP not set).")
+        st.stop()
+    if ok:
+        e = normalize_email(email_in); db=load_users(); u=db["users"].get(e)
+        if not u or not verify_password(pwd_in, u.get("password_hash","")):
+            st.error("Invalid email or password."); st.session_state.login_attempts += 1
+        elif u.get("status")!="active":
+            st.error("Account not active.")
+        else:
+            st.session_state.authed=True; st.session_state.user_email=e; st.session_state.user_role=u.get("role","user")
+            st.session_state.login_attempts=0; user_dir(e); st.rerun()
+        if st.session_state.login_attempts>=5:
+            st.session_state.lock_until = datetime.now()+timedelta(minutes=2)
+            st.warning("Too many attempts. Locked for 2 minutes.")
+
+def logout_button():
+    with st.sidebar:
+        st.markdown("---")
+        st.caption(f"Signed in as: *{st.session_state.user_email}* ({st.session_state.user_role})")
+        if st.button("Logout"):
+            st.session_state.authed=False; st.session_state.user_email=None; st.session_state.user_role=None; st.rerun()
+
+if not st.session_state.get("authed", False):
+    login_view(); st.stop()
+else:
+    logout_button()
+
+# -------------------- Language pack --------------------
+T = {
+    "English": {
+        "Language":"Language","Select Language":"Select Language","Plant Setup":"Plant Setup","Number of Stages":"Number of Stages",
+        "Vessels / Membranes":"Vessels / Membranes","Vessels":"Vessels",'Membranes per vessel (8")':'Membranes per vessel (8")',
+        "Plant Capacity":"Plant Capacity","Design Recovery %":"Design Recovery %",
+        "Dashboard":"Dashboard","Daily Report":"Daily Report","Weekly Report":"Weekly Report","Monthly Report":"Monthly Report",
+        "History & Exports":"History & Exports","RO Design":"RO Design",
+        "Request more capacity slots":"Request more capacity slots","How many more slots?":"How many more slots?",
+        "Reason (optional)":"Reason (optional)","Send request":"Send request",
+        "Capacity slots: {used}/{quota} used":"Capacity slots: {used}/{quota} used",
+        "Added capacity {cap} m³/day • {used}/{quota} used.":"Added capacity {cap} m³/day • {used}/{quota} used.",
+        "Using existing capacity {cap} m³/day (does not count).":"Using existing capacity {cap} m³/day (does not count).",
+        "Limit reached ({used}/{quota}). Request more capacity slots.":"Limit reached ({used}/{quota}). Request more capacity slots.",
+        "Admin Panel":"Admin Panel","Users":"Users","Approve User":"Approve User","Disable User":"Disable User","Reset Password":"Reset Password",
+        "Requests":"Requests","Approve":"Approve","Reject":"Reject","No pending requests.":"No pending requests."
+    },
+    "Arabic": {
+        "Language":"اللغة","Select Language":"اختر اللغة","Plant Setup":"إعداد المحطة","Number of Stages":"عدد المراحل",
+        "Vessels / Membranes":"الأوعية / الأغشية","Vessels":"أوعية",'Membranes per vessel (8")':'أغشية لكل وعاء (8")',
+        "Plant Capacity":"سعة المحطة","Design Recovery %":"نسبة الاسترجاع التصميمية",
+        "Dashboard":"لوحة التحكم","Daily Report":"تقرير يومي","Weekly Report":"تقرير أسبوعي","Monthly Report":"تقرير شهري",
+        "History & Exports":"السجل والتنزيلات","RO Design":"تصميم RO",
+        "Request more capacity slots":"طلب زيادة عدد السعات","How many more slots?":"كم عدد السعات؟",
+        "Reason (optional)":"السبب (اختياري)","Send request":"إرسال الطلب",
+        "Capacity slots: {used}/{quota} used":"خانات السعة: {used}/{quota} مستخدمة",
+        "Added capacity {cap} m³/day • {used}/{quota} used.":"تمت إضافة سعة {cap} م³/يوم • {used}/{quota} مستخدمة.",
+        "Using existing capacity {cap} m³/day (does not count).":"سعة سابقة {cap} م³/يوم (لا تُحتسب).",
+        "Limit reached ({used}/{quota}). Request more capacity slots.":"تم بلوغ الحد ({used}/{quota}). اطلب المزيد.",
+        "Admin Panel":"لوحة المشرف","Users":"المستخدمون","Approve User":"اعتماد المستخدم","Disable User":"تعطيل المستخدم","Reset Password":"إعادة تعيين كلمة المرور",
+        "Requests":"الطلبات","Approve":"موافقة","Reject":"رفض","No pending requests.":"لا توجد طلبات معلقة."
+    },
+    "Malayalam": {
+        "Language":"ഭാഷ","Select Language":"ഭാഷ തിരഞ്ഞെടുക്കുക","Plant Setup":"പ്ലാന്റ് ക്രമീകരണം","Number of Stages":"സ്റ്റേജ് എണ്ണം",
+        "Vessels / Membranes":"വെസൽസ് / മെംബ്രെയ്ൻസ്","Vessels":"വെസൽസ്",'Membranes per vessel (8")':'ഓരോ വെസലിലും മെംബ്രെയ്ൻസ് (8")',
+        "Plant Capacity":"പ്ലാന്റ് ശേഷി","Design Recovery %":"ഡിസൈൻ റിക്കവറി %",
+        "Dashboard":"ഡാഷ്ബോർഡ്","Daily Report":"ഡെയ്‌ലി റിപ്പോർട്ട്","Weekly Report":"വീക്ലി റിപ്പോർട്ട്","Monthly Report":"മന്ത്‌ലി റിപ്പോർട്ട്",
+        "History & Exports":"ഹിസ്റ്ററി/ഡൗൺലോഡ്സ്","RO Design":"RO ഡിസൈൻ",
+        "Request more capacity slots":"കൂടുതൽ കപ്പാസിറ്റി സ്ലോട്ടുകൾ","How many more slots?":"എത്ര സ്ലോട്ടുകൾ വേണം?",
+        "Reason (optional)":"കാരണം (ഐച്ഛികം)","Send request":"റിക്വസ്റ്റ് അയയ്‌ക്കുക",
+        "Capacity slots: {used}/{quota} used":"കപ്പാസിറ്റി സ്ലോട്ടുകൾ: {used}/{quota} ഉപയോഗിച്ചു",
+        "Added capacity {cap} m³/day • {used}/{quota} used.":"{cap} m³/day ചേർത്തു • {used}/{quota} ഉപയോഗിച്ചു.",
+        "Using existing capacity {cap} m³/day (does not count).":"മുമ്പ് ഉപയോഗിച്ചത് {cap} m³/day (കൗണ്ട് ഇല്ല).",
+        "Limit reached ({used}/{quota}). Request more capacity slots.":"പരിധി തീർന്നു ({used}/{quota}). കൂടുതൽ സ്ലോട്ടുകൾ ആവശ്യപ്പെടൂ.",
+        "Admin Panel":"അഡ്മിൻ പാനൽ","Users":"ഉപയോക്താക്കൾ","Approve User":"അംഗീകരിക്കുക","Disable User":"ഡിസ്‌ബിൾ","Reset Password":"പാസ്‌വേഡ് റീസെറ്റ്",
+        "Requests":"റിക്വസ്റ്റ്","Approve":"അംഗീകരിക്കുക","Reject":"നിരസിക്കുക","No pending requests.":"പെൻഡിംഗ് ഒന്നുമില്ല."
+    },
+    "Hindi": {
+        "Language":"भाषा","Select Language":"भाषा चुनें","Plant Setup":"प्लांट सेटअप","Number of Stages":"स्टेज की संख्या",
+        "Vessels / Membranes":"वेसल्स / मेंब्रेन","Vessels":"वेसल्स",'Membranes per vessel (8")':'प्रति वेसल मेंब्रेन (8")',
+        "Plant Capacity":"प्लांट क्षमता","Design Recovery %":"डिज़ाइन रिकवरी %",
+        "Dashboard":"डैशबोर्ड","Daily Report":"डेली रिपोर्ट","Weekly Report":"वीकली रिपोर्ट","Monthly Report":"मंथली रिपोर्ट",
+        "History & Exports":"इतिहास/डाउनलोड","RO Design":"RO डिज़ाइन",
+        "Request more capacity slots":"अधिक क्षमता स्लॉट","How many more slots?":"कितने और स्लॉट?",
+        "Reason (optional)":"कारण (वैकल्पिक)","Send request":"अनुरोध भेजें",
+        "Capacity slots: {used}/{quota} used":"क्षमता स्लॉट: {used}/{quota} उपयोग",
+        "Added capacity {cap} m³/day • {used}/{quota} used.":"क्षमता {cap} m³/day जोड़ी गई • {used}/{quota} उपयोग।",
+        "Using existing capacity {cap} m³/day (does not count).":"पहले से वही क्षमता (काउंट नहीं)।",
+        "Limit reached ({used}/{quota}). Request more capacity slots.":"सीमा पूरी ({used}/{quota}). अधिक स्लॉट माँगें।",
+        "Admin Panel":"एडमिन पैनल","Users":"यूज़र्स","Approve User":"स्वीकृत करें","Disable User":"निष्क्रिय करें","Reset Password":"पासवर्ड रीसेट",
+        "Requests":"अनुरोध","Approve":"स्वीकृत","Reject":"अस्वीकृत","No pending requests.":"कोई लंबित अनुरोध नहीं।"
+    }
+}
+def tr(s, lang): return T.get(lang, {}).get(s, s)
+def tr_fmt(key, lang, **kw):
+    s = tr(key, lang)
+    try: return s.format(**kw)
+    except Exception: return s
+
+# -------------------- Sidebar --------------------
+with st.sidebar:
+    st.header("🌐 " + tr("Language", "English"))
+    lang = st.selectbox(tr("Select Language", "English"), list(T.keys()), index=0)
+
+with st.sidebar:
+    st.header("⚙ " + tr("Plant Setup", lang))
+    num_stages = st.number_input(tr("Number of Stages", lang), 1, 10, 3, 1)
+
+with st.sidebar:
+    st.subheader("🧱 " + tr("Vessels / Membranes", lang))
+    default_vessels = [8,4,2] + [1]*max(num_stages-3,0)
+    vessels_per_stage=[]
+    for s in range(num_stages):
+        vessels_per_stage.append(st.number_input(f"Stage {s+1} • {tr('Vessels', lang)}", 1, 500, default_vessels[s] if s<len(default_vessels) else 1, 1))
+    membranes_per_vessel = st.number_input(tr('Membranes per vessel (8")', lang), 1, 8, 6, 1)
+
+def m3d_to_lpm(m3d): return (m3d*1000.0)/1440.0
+
+with st.sidebar:
+    st.subheader("📊 " + tr("Plant Capacity", lang))
+    plant_capacity = st.number_input(tr("Plant Capacity", lang) + " (m³/day)", 10, 20000, 500, 10)
+    design_rec    = st.slider(tr("Design Recovery %", lang), 40, 85, 70)
+    d_feed = m3d_to_lpm(plant_capacity); d_prod = round(d_feed*(design_rec/100.0), 1); d_rej = max(round(d_feed - d_prod, 1), 0.0)
+    st.caption(f"Design @ {design_rec}% → Product ~ {d_prod} LPM, Feed ~ {d_feed:.1f} LPM, Reject ~ {d_rej} LPM")
+    page_mode = st.radio("Page", [tr("Dashboard", lang), tr("Daily Report", lang), tr("Weekly Report", lang), tr("Monthly Report", lang), tr("History & Exports", lang), tr("RO Design", lang)], index=0)
+
+# persist for reuse
+st.session_state["lang"]=lang; st.session_state["page_mode"]=page_mode
+st.session_state["num_stages"]=num_stages; st.session_state["vessels_per_stage"]=vessels_per_stage
+st.session_state["membranes_per_vessel"]=membranes_per_vessel
+st.session_state["design_rec"]=design_rec; st.session_state["plant_capacity"]=plant_capacity
+
+# -------------------- Paths --------------------
+def plant_key(capacity_m3d: int) -> str: return f"{capacity_m3d}m3d_{st.session_state['num_stages']}stages"
+def user_csv_path(email: str, capacity_m3d: int) -> Path: return user_dir(email) / f"daily_{plant_key(capacity_m3d)}.csv"
+def user_reports_dir(email: str, kind: str) -> Path: return user_dir(email) / REPORTS_DIRNAME / kind
+def csv_path_for_current(): return user_csv_path(st.session_state.user_email, int(st.session_state["plant_capacity"]))
+
+# -------------------- KPI helpers & maintenance --------------------
+def safe_div(a,b): b=1e-9 if (b in (None,0)) else b; a=0.0 if a is None else a; return a/b
+def kpi_recovery_pct(product_lpm, feed_lpm): return max(0.0, min(100.0, safe_div(product_lpm, feed_lpm)*100.0))
+def kpi_rejection_pct(prod_tds, upstream_tds):
+    if prod_tds is None or upstream_tds in (None,0): return None
+    return max(0.0, min(100.0, (1.0 - (prod_tds/max(upstream_tds,1e-6)))*100.0))
+def kpi_delta_p(out_bar, in_bar):
+    if out_bar is None or in_bar is None: return None
+    return max(0.0, float(out_bar)-float(in_bar))
+def temperature_correction_factor(temp_c): return max(0.6, min(1.6, 1.0 + 0.03*(temp_c-25.0)))
+def osmotic_pressure_approx(tds_mgL, temp_c): T=temp_c+273.15; return 0.0008*max(tds_mgL,0.0)*(T/298.0)
+def net_driving_pressure_bar(hp_out_bar, feed_out_bar, feed_tds, prod_tds, temp_c):
+    deltaP=max(hp_out_bar - feed_out_bar, 0.0)
+    return max(deltaP - (osmotic_pressure_approx(feed_tds,temp_c) - osmotic_pressure_approx(prod_tds,temp_c)), 0.0)
+def specific_energy_kwh_m3(hp_out_bar, feed_flow_lpm, efficiency_pct, product_flow_lpm):
+    Q_ls=max(feed_flow_lpm,0.0)/60.0; eta=max(efficiency_pct/100.0,0.01)
+    kW=(hp_out_bar*Q_ls)/(36.0*eta); prod_m3_h=(product_flow_lpm*60)/1000.0
+    return kW / max(prod_m3_h,1e-6)
+def permeate_quality_index(product_tds, target_tds=50.0):
+    if product_tds is None: return None
+    return max(0.0, 100.0 - min(100.0, (product_tds/max(target_tds,1e-6))*100.0))
+def normalized_permeate_flow(permeate_flow_lpm, tcf): return safe_div(permeate_flow_lpm, tcf)
+
+DEFAULT_LIMITS = {"product_tds_max": 60.0, "cartridge_dp_max": 0.7, "vessel_dp_max": 1.5,
+                  "rejection_min": 60.0, "recovery_target": 70.0, "recovery_high_margin": 3.0}
+
+def maintenance_note_from_row(row, limits=DEFAULT_LIMITS):
+    tips=[]
+    if (row.get("rejection_pct") or 100) < limits["rejection_min"]:
+        tips.append("Rejection below target → inspect for fouling/bypass; plan alkaline+acid CIP.")
+    if (row.get("product_tds") or 0) > limits["product_tds_max"]:
+        tips.append("Product TDS high → check integrity (O-rings, interconnects), tighten concentrate valve.")
+    if (row.get("cartridge_dp") or 0) > limits["cartridge_dp_max"]:
+        tips.append("Cartridge ΔP high → replace cartridge / check clogging upstream.")
+    if (row.get("vessel_dp") or 0) > limits["vessel_dp_max"]:
+        tips.append("Vessel ΔP high → channeling/scaling risk; verify brine flow & antiscalant.")
+    if not row.get("feed_vs_sum_ok", True):
+        tips.append("Flow imbalance noted → verify flowmeters & throttling set-points.")
+    if not tips:
+        tips.append("Inputs vs outputs look healthy today. Keep PM on schedule (cartridge & CIP planning).")
+    return " ".join(tips)
+
+# -------------------- Header --------------------
+st.title(f"{BRAND} • RO Dashboard")
+st.markdown(f'<span class="lee-badge">User: {st.session_state.user_email}</span>', unsafe_allow_html=True)
+cap = int(st.session_state["plant_capacity"])
+brk = " | ".join([f"S{i+1}:{v}" for i,v in enumerate(st.session_state["vessels_per_stage"])])
+tot_v = int(sum(st.session_state["vessels_per_stage"]))
+tot_m = int(tot_v * st.session_state["membranes_per_vessel"])
+st.caption(f"Design: {brk} • Vessels: {tot_v} • Membranes: {tot_m} • Capacity: {cap} m³/day")
+# ---------- DASHBOARD QUICK KPIs ----------
+if st.session_state["page_mode"] == tr("Dashboard", st.session_state["lang"]):
+    path = csv_path_for_current()
+    c1,c2,c3,c4,c5,c6 = st.columns(6)
+    if path.exists():
+        df = pd.read_csv(path)
+        if not df.empty:
+            last = df.iloc[-1]
+            c1.metric("Recovery %", f"{last.get('recovery_pct',0):.1f}")
+            c2.metric("Rejection %", f"{last.get('rejection_pct',0):.1f}")
+            c3.metric("Product TDS (ppm)", f"{last.get('product_tds',0):.0f}")
+            c4.metric("ΔP Cartridge (bar)", f"{last.get('cartridge_dp',0):.2f}")
+            c5.metric("ΔP Vessels (bar)", f"{last.get('vessel_dp',0):.2f}")
+            pqi = permeate_quality_index(last.get("product_tds",0)); c6.metric("PQI", f"{(pqi or 0):.0f}/100")
+        else:
+            c1.write("No data yet.")
     else:
-        email = st.text_input(t("email",lang))
-        newp  = st.text_input(t("password",lang), type="password")
-        if st.button(t("reset",lang), type="primary"):
-            if not email or not newp: st.error(t("need_en",lang))
-            else: auth_reset(email,newp)
+        c1.write("No data yet.")
 
-def app_page():
-    lang = st.session_state.lang
-    topbar()
-    st.markdown(f"<div class='section-title'>{t('plant_calc',lang)}</div>", unsafe_allow_html=True)
+# ---------- DAILY REPORT ----------
+if st.session_state["page_mode"] == tr("Daily Report", st.session_state["lang"]):
+    st.markdown("### 🗓 Daily Inputs")
 
-    # ===== Inputs on a single FORM with Calculate =====
-    with st.form("inputs_form", border=True):
-        col_stage, col_names, col_env = st.columns([1.2, 2.0, 1.3])
+    colA,colB,colC = st.columns(3)
+    with colA:
+        report_date = st.date_input("Date", value=date.today())
+        operator = st.text_input("Operator (optional)", "")
+        feed_tds = st.number_input("Feed TDS (ppm)", 1.0, 200000.0, 120.0, 1.0)
+        product_tds = st.number_input("Product TDS (ppm)", 0.1, 200000.0, 45.0, 0.1)
+    with colB:
+        feed_p_in  = st.number_input("Feed Pressure IN (bar)", 0.0, 100.0, 1.2, 0.1)
+        feed_p_out = st.number_input("Feed Pressure OUT (bar)",0.0, 100.0, 1.0, 0.1)
+        cartridge_p = st.number_input("Cartridge Filter Pressure (bar)", 0.0, 100.0, 1.7, 0.1)
+        hp_in  = st.number_input("HP Pump IN (bar)", 0.0, 200.0, 2.0, 0.1)
+        hp_out = st.number_input("HP Pump OUT (bar)",0.0, 200.0, 12.0, 0.1)
+    with colC:
+        d_feed = (st.session_state["plant_capacity"]*1000.0/1440.0)
+        d_prod = round(d_feed*(st.session_state["design_rec"]/100.0), 1)
+        feed_flow   = st.number_input("Feed Flow (LPM)",    1.0, 200000.0, float(d_feed), 1.0)
+        product_flow= st.number_input("Product Flow (LPM)", 0.1, 200000.0, float(d_prod), 0.1)
+        notes_free  = st.text_area("Operator Notes", "")
 
-        with col_stage:
-            stage_keys = ["single", "two", "three"]  # stable keys
-            try:
-                idx = stage_keys.index(st.session_state.stage_choice)
-            except ValueError:
-                idx = 0
-            stage_choice = st.radio(
-                t("stage_type", lang),
-                stage_keys,
-                index=idx,
-                format_func=lambda k: t(k, lang)
-            )
-            st.session_state.stage_choice = stage_choice
-            cf_limit = st.slider("CF limit for Max Output", 2.0, 3.0, 2.5, 0.1)
+    # Per-vessel permeate TDS (optional)
+    per_vessel_rows=[]
+    with st.expander("Per-Vessel Output TDS (optional)"):
+        for s_idx, vessels in enumerate(st.session_state["vessels_per_stage"], start=1):
+            st.caption(f"Stage {s_idx} — {vessels} vessel(s)")
+            cols = st.columns(min(6, vessels))
+            for v in range(1, vessels+1):
+                col = cols[(v-1)%len(cols)]
+                with col:
+                    val = st.number_input(f"S{s_idx} V{v} permeate TDS", 0.1, 200000.0, float(product_tds if s_idx==st.session_state["num_stages"] else product_tds*1.2), 0.1, key=f"s{s_idx}_v{v}")
+                per_vessel_rows.append({"Stage": s_idx, "Vessel": v, "Permeate TDS (ppm)": float(val)})
 
-        with col_names:
-            st.markdown("<div class='form-title'>Plant Info</div>", unsafe_allow_html=True)
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            plant_name = st.text_input(t("plant_name",lang), "My RO Plant")
-            site_name  = st.text_input(t("site_name",lang), "Site A")
-            st.markdown("</div>", unsafe_allow_html=True)
+    # Advanced water/operation (optional)
+    with st.expander("Advanced Water & Operation Inputs (optional)"):
+        col1,col2,col3 = st.columns(3)
+        with col1:
+            temp_c = st.number_input("Water Temperature (°C)", 1.0, 50.0, 25.0, 0.5)
+            ph = st.number_input("pH", 1.0, 14.0, 7.2, 0.1)
+            alkalinity_mgL = st.number_input("Alkalinity as CaCO₃ (mg/L)", 0.0, 1000.0, 120.0, 1.0)
+            hardness_mgL   = st.number_input("Hardness as CaCO₃ (mg/L)", 0.0, 3000.0, 200.0, 1.0)
+        with col2:
+            sdi = st.number_input("SDI", 0.0, 10.0, 3.0, 0.1)
+            turbidity_ntu = st.number_input("Turbidity (NTU)", 0.0, 1000.0, 0.5, 0.1)
+            tss_mgL = st.number_input("TSS (mg/L)", 0.0, 5000.0, 5.0, 0.5)
+            free_chlorine_mgL = st.number_input("Free Chlorine (mg/L)", 0.0, 10.0, 0.0, 0.1)
+        with col3:
+            co2_mgL = st.number_input("CO₂ (mg/L)", 0.0, 100.0, 5.0, 0.5)
+            silica_mgL = st.number_input("Silica (mg/L)", 0.0, 200.0, 10.0, 0.5)
+            pump_efficiency = st.number_input("HP Pump Efficiency (%)", 30.0, 90.0, 75.0, 1.0)
 
-        with col_env:
-            st.markdown("<div class='form-title'>Environment</div>", unsafe_allow_html=True)
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            capacity   = st.number_input(t("capacity",lang), 0.0, 100000.0, 100.0)
-            temperature_c = st.number_input(t("temp",lang), 0.0, 60.0, 25.0)
-            st.markdown("</div>", unsafe_allow_html=True)
+    if st.button("Calculate & Save"):
+        # Hydraulics
+        reject_flow = max(feed_flow - product_flow, 0.0)
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.markdown("<div class='form-title'>Quality</div>", unsafe_allow_html=True)
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            feed_tds    = st.number_input(t("feed_tds",lang), 0.0, 100000.0, 900.0, step=1.0)
-            product_tds = st.number_input(t("perm_tds",lang), 0.0, 100000.0, 120.0, step=1.0)
-            st.markdown("</div>", unsafe_allow_html=True)
-        with c2:
-            st.markdown("<div class='form-title'>Flows (LPM)</div>", unsafe_allow_html=True)
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            feed_flow      = st.number_input(t("feed_flow",lang), 0.0, 10000.0, 180.0, step=0.1)
-            product_flow   = st.number_input(t("perm_flow",lang), 0.0, 10000.0, 125.0, step=0.1)
-            reject_flow_in = st.number_input(t("rej_flow",lang), 0.0, 10000.0, 0.0, step=0.1)
-            st.markdown("</div>", unsafe_allow_html=True)
-        with c3:
-            st.markdown("<div class='form-title'>Pressures (bar)</div>", unsafe_allow_html=True)
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            hp_out_bar  = st.number_input(t("hp",lang), 0.0, 1000.0, 10.0, step=0.1)
-            brine_bar   = st.number_input(t("brine",lang), 0.0, 1000.0, 7.0, step=0.1)
-            perm_bp_bar = st.number_input(t("perm_bp",lang), 0.0, 1000.0, 0.0, step=0.1)
-            st.markdown("</div>", unsafe_allow_html=True)
+        # Core KPIs
+        recovery_pct  = kpi_recovery_pct(product_flow, feed_flow)
+        rejection_pct = kpi_rejection_pct(product_tds, feed_tds)
+        cartridge_dp  = kpi_delta_p(cartridge_p, feed_p_out)
+        vessel_dp     = kpi_delta_p(hp_out, feed_p_out)
+        hp_dp         = kpi_delta_p(hp_out, hp_in)
 
-        # Per-stage sliders (if 2/3 stage)
-        if stage_choice != "single":
-            s1, s2, s3 = st.columns([1,1,1])
-            with s1: r1 = st.slider(t("s_recovery",lang).format(1), 10, 85, 60) / 100.0
-            with s2: r2 = st.slider(t("s_recovery",lang).format(2), 10, 85, 50) / 100.0
-            with s3: r3 = st.slider(t("s_recovery",lang).format(3), 10, 85, 40) / 100.0 if stage_choice=="three" else 0.0
+        # Build per-vessel DF + stage averages + per-vessel rejection
+        per_vessel_df = None
+        stage_avgs = []        # [(stage, avg_tds, stage_rej_pct)]
+        if per_vessel_rows:
+            # Calculate stage averages first pass (only permeate TDS)
+            stage_groups = {}
+            for r in per_vessel_rows:
+                stage_groups.setdefault(r["Stage"], []).append(r["Permeate TDS (ppm)"])
+            # compute rejections using upstream: S1 vs feed_tds; S(n) vs previous stage avg
+            prev_stage_avg = None
+            rows_out=[]
+            for s in range(1, st.session_state["num_stages"]+1):
+                vals = stage_groups.get(s, [])
+                avg_tds = float(np.mean(vals)) if vals else None
+                upstream = feed_tds if s==1 else (prev_stage_avg if prev_stage_avg is not None else feed_tds)
+                stage_rej = kpi_rejection_pct(avg_tds, upstream) if avg_tds is not None else None
+                stage_avgs.append((s, avg_tds, stage_rej))
+                prev_stage_avg = avg_tds if avg_tds is not None else prev_stage_avg
+                # per-vessel rows with rejection %
+                if vals:
+                    for v_idx, val in enumerate(vals, start=1):
+                        rej = kpi_rejection_pct(val, upstream)
+                        rows_out.append({"Stage": s, "Vessel": v_idx, "Permeate TDS (ppm)": float(val), "Rejection %": rej})
+            if 'rows_out' in locals() and rows_out:
+                per_vessel_df = pd.DataFrame(rows_out)
 
-            pcol1, pcol2, pcol3 = st.columns([1,1,1])
-            with pcol1: p1_tds = st.number_input(t("s_perm_tds",lang).format(1), min_value=0.0, value=float(product_tds), key="p1_tds")
-            with pcol2: p2_tds = st.number_input(t("s_perm_tds",lang).format(2), min_value=0.0, value=float(product_tds), key="p2_tds")
-            with pcol3: p3_tds = st.number_input(t("s_perm_tds",lang).format(3), min_value=0.0, value=float(product_tds), key="p3_tds") if stage_choice=="three" else float(product_tds)
-        else:
-            r1=r2=r3=0.0; p1_tds=p2_tds=p3_tds=float(product_tds)
+        # More KPIs
+        tcf = temperature_correction_factor(temp_c)
+        ndp = net_driving_pressure_bar(hp_out, feed_p_out, feed_tds, product_tds, temp_c)
+        salt_passage_pct = 100.0 - (rejection_pct or 0.0)
+        spec_energy = specific_energy_kwh_m3(hp_out, feed_flow, pump_efficiency, product_flow)
+        daily_kwh = spec_energy * (product_flow*60/1000.0)*24
+        total_flow_check = product_flow + reject_flow
+        feed_match = abs(total_flow_check - feed_flow) <= max(2.0, 0.02*feed_flow)
+        pqi = permeate_quality_index(product_tds, target_tds=50.0)
+        npf = normalized_permeate_flow(product_flow, tcf)
 
-        # Per-vessel inputs (inside the form, BEFORE results)
-        def vessel_inputs(label: str, default_count: int, key_prefix: str):
-            st.markdown(f"<div class='section-title'>{t('vessel_hdr',lang).format(label)}</div>", unsafe_allow_html=True)
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            vcount = st.slider(t("vessel_count",lang).format(label), 1, 100, default_count, key=f"{key_prefix}_count")
-            page_size=10; pages=(vcount+page_size-1)//page_size
-            page = st.number_input(t("page",lang), 1, max(1,pages), 1, key=f"{key_prefix}_page")
-            start=(page-1)*page_size; end=min(start+page_size, vcount)
-            cols = st.columns(5)
-            vals=[0.0]*vcount
-            for i in range(start,end):
-                with cols[i%5]:
-                    vals[i] = st.number_input(f"{label} V{i+1} TDS", min_value=0.0, value=0.0, step=1.0, key=f"{key_prefix}_v{i+1}")
-            st.markdown("</div>", unsafe_allow_html=True)
-            return vals
+        # Collect row
+        path = csv_path_for_current()
+        row = {
+            "date": report_date.strftime("%Y-%m-%d"),
+            "user": st.session_state.user_email, "operator": operator,
+            "capacity_m3d": int(st.session_state["plant_capacity"]),
+            "design_recovery": float(st.session_state["design_rec"]),
+            "stage_count": int(st.session_state["num_stages"]),
+            "vessels_per_stage": json.dumps(st.session_state["vessels_per_stage"]),
+            "membranes_per_vessel": int(st.session_state["membranes_per_vessel"]),
 
-        if stage_choice == "single":
-            v_s1 = vessel_inputs(t("s1",lang), 6, "s1"); v_s2=[]; v_s3=[]
-        elif stage_choice == "two":
-            v_s1 = vessel_inputs(t("s1",lang), 6, "s1"); v_s2 = vessel_inputs(t("s2",lang), 3, "s2"); v_s3=[]
-        else:
-            v_s1 = vessel_inputs(t("s1",lang), 6, "s1"); v_s2 = vessel_inputs(t("s2",lang), 3, "s2"); v_s3 = vessel_inputs(t("s3",lang), 2, "s3")
+            # inputs
+            "feed_tds": float(feed_tds), "product_tds": float(product_tds),
+            "feed_p_in": float(feed_p_in), "feed_p_out": float(feed_p_out),
+            "cartridge_p": float(cartridge_p), "hp_in": float(hp_in), "hp_out": float(hp_out),
+            "feed_flow_lpm": float(feed_flow), "product_flow_lpm": float(product_flow),
+            "reject_flow_lpm": float(reject_flow),
 
-        # ---- Calculate button (gates all outputs) ----
-        submitted = st.form_submit_button(t("calc",lang), type="primary")
-
-    # ===== If not calculated yet, show a hint and stop =====
-    if not submitted and not st.session_state.last_calc:
-        st.info("Fill all inputs and click *Calculate* to see professional results.")
-        return
-
-    # ===== Compute (on submit) =====
-    if submitted:
-        reject_flow = reject_flow_in if reject_flow_in > 0 else max(feed_flow - product_flow, 0.0)
-        core = compute_core(feed_tds, product_tds, feed_flow, product_flow, reject_flow,
-                            temperature_c, hp_out_bar, brine_bar, perm_bp_bar)
-        LPM_TO_M3D = 1.44; prod_m3d = product_flow * LPM_TO_M3D; core["prod_m3d"]=round(prod_m3d,2)
-        qp_max, qr_at_max, rej_tds_at_max = compute_max_safe_output(feed_tds, product_tds, feed_flow, cf_limit)
-
-        # store snapshot for rerender on page switches
-        st.session_state.last_calc = {
-            "core":core, "qp_max":qp_max, "qr_at_max":qr_at_max, "rej_tds_at_max":rej_tds_at_max,
-            "meta": dict(plant_name=plant_name, site_name=site_name, capacity=capacity,
-                         temperature_c=temperature_c, stage_choice=stage_choice,
-                         feed_tds=feed_tds, product_tds=product_tds, feed_flow=feed_flow,
-                         product_flow=product_flow, reject_flow=reject_flow,
-                         hp_out_bar=hp_out_bar, brine_bar=brine_bar, perm_bp_bar=perm_bp_bar,
-                         v_s1=v_s1, v_s2=v_s2, v_s3=v_s3, cf_limit=cf_limit)
+            # KPIs
+            "recovery_pct": float(recovery_pct),
+            "rejection_pct": float(rejection_pct) if rejection_pct is not None else None,
+            "cartridge_dp": float(cartridge_dp) if cartridge_dp is not None else None,
+            "vessel_dp": float(vessel_dp) if vessel_dp is not None else None,
+            "hp_dp": float(hp_dp) if hp_dp is not None else None,
+            "feed_vs_sum_ok": bool(feed_match), "notes": notes_free,
+            "temp_c": float(temp_c), "ph": float(ph), "alkalinity_mgL": float(alkalinity_mgL), "hardness_mgL": float(hardness_mgL),
+            "sdi": float(sdi), "turbidity_ntu": float(turbidity_ntu), "tss_mgL": float(tss_mgL), "free_chlorine_mgL": float(free_chlorine_mgL),
+            "co2_mgL": float(co2_mgL), "silica_mgL": float(silica_mgL),
+            "pump_efficiency_pct": float(pump_efficiency),
+            "tcf": float(tcf), "ndp_bar": float(ndp), "salt_passage_pct": float(salt_passage_pct),
+            "specific_energy_kwh_m3": float(spec_energy), "daily_kwh": float(daily_kwh),
+            "pqi": float(pqi) if pqi is not None else None, "npf_lpm": float(npf)
         }
 
-    # ===== Use last calculation to render results =====
-    data = st.session_state.last_calc
-    core = data["core"]; qp_max=data["qp_max"]; cf_limit = data["meta"]["cf_limit"]
-    reject_flow = data["meta"]["reject_flow"]; stage_choice = data["meta"]["stage_choice"]
-    plant_name = data["meta"]["plant_name"]; site_name=data["meta"]["site_name"]; capacity=data["meta"]["capacity"]
-    temperature_c=data["meta"]["temperature_c"]
-    feed_tds=data["meta"]["feed_tds"]; product_tds=data["meta"]["product_tds"]
-    feed_flow=data["meta"]["feed_flow"]; product_flow=data["meta"]["product_flow"]
-    hp_out_bar=data["meta"]["hp_out_bar"]; brine_bar=data["meta"]["brine_bar"]; perm_bp_bar=data["meta"]["perm_bp_bar"]
-    v_s1=data["meta"]["v_s1"]; v_s2=data["meta"]["v_s2"]; v_s3=data["meta"]["v_s3"]
-
-    # ===== Quick tiles =====
-    k0 = st.columns(6)
-    with k0[0]: st.metric("Reject Flow (LPM)", f"{reject_flow:.2f}")
-    with k0[1]: st.metric(t("max_out",lang)+f" (CF≤{cf_limit:.1f})", f"{qp_max:.2f}")
-    with k0[2]: st.metric(t("scaling_risk",lang), scaling_risk_label(core["cf"]))
-
-    # ===== KPI Cards =====
-    st.markdown(f"<div class='section-title'>{t('results',lang)}</div>", unsafe_allow_html=True)
-    k1 = st.columns(6)
-    with k1[0]: st.metric(t("recovery",lang),   f"{core['recovery']:.2f}")
-    with k1[1]: st.metric(t("rejection",lang),  f"{core['rejection']:.2f}")
-    with k1[2]: st.metric(t("salt_pass",lang),  f"{core['salt_pass']:.2f}")
-    with k1[3]: st.metric(t("reject_tds",lang), f"{core['reject_tds']:.2f}")
-    with k1[4]: st.metric(t("cf",lang),         f"{core['cf']:.3f}")
-    with k1[5]: st.metric(t("mb",lang),         f"{core['mb_error']:.2f}")
-
-    k2 = st.columns(6)
-    with k2[0]: st.metric(t("dp",lang),      f"{core['dP']:.2f}")
-    with k2[1]: st.metric(t("pi_feed",lang), f"{core['pi_feed']:.2f}")
-    with k2[2]: st.metric(t("pi_perm",lang), f"{core['pi_perm']:.2f}")
-    with k2[3]: st.metric(t("dpi",lang),     f"{core['d_pi']:.2f}")
-    with k2[4]: st.metric(t("ndp",lang),     f"{core['ndp']:.2f}")
-    with k2[5]: st.metric(t("prod",lang),    f"{(product_flow*1.44):.2f}")
-
-    # ===== Overall status + Notes =====
-    st.markdown(f"<div class='section-title'>{t('overall',lang)}</div>", unsafe_allow_html=True)
-    status, reasons = evaluate_status(core)
-    status_box = "good" if status=="Good" else ("ok" if status=="OK" else "bad")
-    overall = overall_text(status)
-    st.markdown(f"<div class='card {status_box}'><b>{overall}</b> — {t('status_hdr',lang)}: {status}</div>", unsafe_allow_html=True)
-
-    notes = make_notes(core, qp_max, cf_limit)
-    st.markdown(f"<div class='card'><b>{t('notes',lang)}</b><div class='note'>" + "<br>".join("• "+n for n in notes) + "</div></div>", unsafe_allow_html=True)
-
-    # ===== Per-vessel table (derived from entered values) =====
-    def stage_reject_tds(qf, feed_ppm, rec_frac, perm_ppm):
-        qp=qf*rec_frac; qr=max(qf-qp,0.0); tds_r=(feed_ppm*qf - perm_ppm*qp)/qr if qr>0 else feed_ppm; return tds_r, qp, qr
-
-    vessel_rows=[]
-    if stage_choice == "single":
-        stage_feed_ppm = feed_tds
-        for i,tv in enumerate(v_s1,1):
-            if 0 < tv <= stage_feed_ppm:
-                rej=(stage_feed_ppm-tv)/stage_feed_ppm*100.0
-                vessel_rows.append({"Stage":"S1",t("vessel",lang):i,t("out_ppm",lang):tv,t("rej_pct",lang):rej,t("pass_pct",lang):100-rej})
-    elif stage_choice == "two":
-        tds_r1, qp1, qr1 = stage_reject_tds(feed_flow, feed_tds, 0.6, product_tds)
-        for i,tv in enumerate(v_s1,1):
-            if 0 < tv <= feed_tds:
-                rej=(feed_tds-tv)/feed_tds*100.0
-                vessel_rows.append({"Stage":"S1",t("vessel",lang):i,t("out_ppm",lang):tv,t("rej_pct",lang):rej,t("pass_pct",lang):100-rej})
-        for i,tv in enumerate(v_s2,1):
-            if 0 < tv <= tds_r1:
-                rej=(tds_r1-tv)/tds_r1*100.0
-                vessel_rows.append({"Stage":"S2",t("vessel",lang):i,t("out_ppm",lang):tv,t("rej_pct",lang):rej,t("pass_pct",lang):100-rej})
-    else:
-        tds_r1, qp1, qr1 = stage_reject_tds(feed_flow, feed_tds, 0.6, product_tds)
-        tds_r2, qp2, qr2 = stage_reject_tds(qr1, tds_r1, 0.5, product_tds)
-        for i,tv in enumerate(v_s1,1):
-            if 0 < tv <= feed_tds:
-                rej=(feed_tds-tv)/feed_tds*100.0
-                vessel_rows.append({"Stage":"S1",t("vessel",lang):i,t("out_ppm",lang):tv,t("rej_pct",lang):rej,t("pass_pct",lang):100-rej})
-        for i,tv in enumerate(v_s2,1):
-            if 0 < tv <= tds_r1:
-                rej=(tds_r1-tv)/tds_r1*100.0
-                vessel_rows.append({"Stage":"S2",t("vessel",lang):i,t("out_ppm",lang):tv,t("rej_pct",lang):rej,t("pass_pct",lang):100-rej})
-        for i,tv in enumerate(v_s3,1):
-            if 0 < tv <= tds_r2:
-                rej=(tds_r2-tv)/tds_r2*100.0
-                vessel_rows.append({"Stage":"S3",t("vessel",lang):i,t("out_ppm",lang):tv,t("rej_pct",lang):rej,t("pass_pct",lang):100-rej})
-
-    df_vessels = pd.DataFrame(vessel_rows) if vessel_rows else pd.DataFrame(
-        columns=["Stage",t("vessel",lang),t("out_ppm",lang),t("rej_pct",lang),t("pass_pct",lang)]
-    )
-    if not df_vessels.empty:
-        st.markdown(f"<div class='section-title'>{t('per_vessel',lang)}</div>", unsafe_allow_html=True)
-        st.dataframe(df_vessels, use_container_width=True, height=280)
-
-    # ===== Save & Exports =====
-    s1, s2 = st.columns([1,4])
-    with s1:
-        if st.button("💾 "+t("save",lang), type="primary"):
-            ok2, msg2 = user_can_use_capacity(st.session_state.user, capacity)
-            if not ok2: st.error(msg2)
-            else:
-                _execute(
-                    """INSERT INTO runs(ts,user_id,plant_name,site_name,capacity,temperature,feed_tds,product_tds,
-                       feed_flow,product_flow,reject_flow,hp,brine,perm_bp,stage_type,
-                       recovery,rejection,salt_pass,reject_tds,cf,mb_error,dP,pi_feed,pi_perm,d_pi,ndp,prod_m3d)
-                       VALUES(datetime('now'),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (st.session_state.user["id"],plant_name,site_name,capacity,temperature_c,
-                     feed_tds,product_tds,feed_flow,product_flow,reject_flow,
-                     hp_out_bar,brine_bar,perm_bp_bar,stage_choice,
-                     core["recovery"],core["rejection"],core["salt_pass"],core["reject_tds"],core["cf"],core["mb_error"],
-                     core["dP"],core["pi_feed"],core["pi_perm"],core["d_pi"],core["ndp"],core["prod_m3d"])
-                )
-                st.success(t("saved",lang))
-
-    export_section(core, plant_name, site_name, capacity, temperature_c, stage_choice,
-                   feed_tds, product_tds, feed_flow, product_flow, reject_flow,
-                   hp_out_bar, brine_bar, perm_bp_bar, df_vessels, qp_max, cf_limit)
-    # =================== Exports (Excel + PDF) ===================
-def export_section(core, plant_name, site_name, capacity, temperature_c, stage_choice,
-                   feed_tds, product_tds, feed_flow, product_flow, reject_flow,
-                   hp_out_bar, brine_bar, perm_bp_bar, df_vessels, qp_max, cf_limit):
-    lang = st.session_state.lang
-
-    status, reasons = evaluate_status(core)
-    overall = overall_text(status)
-    status_text = f"{overall} — {status}"
-    if reasons: status_text += " — " + "; ".join(reasons[:6])
-
-    display_stage = t(stage_choice, lang)
-    df_inputs = pd.DataFrame({
-        "Parameter":[t("plant_name",lang),t("site_name",lang),t("capacity",lang),t("temp",lang),t("stage_type",lang),
-                     t("feed_tds",lang),t("perm_tds",lang),t("feed_flow",lang),t("perm_flow",lang),t("rej_flow",lang),
-                     t("hp",lang),t("brine",lang),t("perm_bp",lang)],
-        "Value":[plant_name,site_name,capacity,temperature_c,display_stage,feed_tds,product_tds,
-                 feed_flow,product_flow,reject_flow,hp_out_bar,brine_bar,perm_bp_bar]
-    })
-
-    notes = make_notes(core, qp_max, cf_limit)
-
-    df_outputs = pd.DataFrame({
-        "KPI":[
-            "Performance Status",
-            "Reject Flow (LPM)",
-            t("max_out",lang)+f" (CF≤{cf_limit:.1f})",
-            t("recovery",lang),t("rejection",lang),t("salt_pass",lang),t("reject_tds",lang),t("cf",lang),
-            t("mb",lang),t("dp",lang),t("pi_feed",lang),t("pi_perm",lang),t("dpi",lang),t("ndp",lang),t("prod",lang),
-            t("notes",lang)
-        ],
-        "Value":[
-            status_text,
-            core["reject_flow"],
-            qp_max,
-            core["recovery"],core["rejection"],core["salt_pass"],core["reject_tds"],core["cf"],
-            core["mb_error"],core["dP"],core["pi_feed"],core["pi_perm"],core["d_pi"],core["ndp"],core["prod_m3d"],
-            " | ".join(notes)
-        ]
-    })
-
-    ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    excel_buf = BytesIO()
-    with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
-        wb = writer.book
-        ws = wb.add_worksheet("Report")
-        writer.sheets["Report"] = ws
-
-        title = wb.add_format({"bold":True,"font_size":16,"font_color":"#1f6feb"})
-        hdr   = wb.add_format({"bold":True,"bg_color":"#E6F0FF","border":1})
-        box   = wb.add_format({"border":1})
-        num2  = wb.add_format({"num_format":"0.00","border":1})
-
-        ws.set_column(0,0,32)
-        ws.set_column(1,1,22)
-        ws.set_column(3,8,18)
-
-        row = 0
-        ws.merge_range(row,0,row,4,"LeeWave – RO Run Report", title)
-        row += 2
-
-        ws.write(row,0,t("inputs",lang),hdr); row += 1
-        ws.write_row(row,0,["Parameter","Value"],hdr); row += 1
-        for p,v in df_inputs.itertuples(index=False):
-            ws.write(row,0,p,box)
-            if isinstance(v,(int,float)): ws.write_number(row,1,float(v),num2)
-            else: ws.write(row,1,str(v),box)
-            row += 1
-        row += 1
-
-        ws.write(row,0,t("outputs",lang),hdr); row += 1
-        kpi_start = row
-        ws.write_row(row,0,["KPI","Value"],hdr); row += 1
-        for k,v in df_outputs.itertuples(index=False):
-            ws.write(row,0,k,box)
-            if isinstance(v,(int,float)): ws.write_number(row,1,float(v),num2)
-            else: ws.write(row,1,str(v),box)
-            row += 1
-        kpi_end = row - 1
-        row += 1
-
-        ws.write(row,0,t("per_vessel",lang),hdr); row += 1
-        if df_vessels.empty:
-            ws.write(row,0,t("no_vessels",lang)); row += 1
+        # Save / merge
+        df_new=pd.DataFrame([row])
+        if path.exists():
+            df_old=pd.read_csv(path); df_old["date"]=df_old["date"].astype(str)
+            df_all=pd.concat([df_old[df_old["date"]!=row["date"]], df_new], ignore_index=True).sort_values("date")
         else:
-            ws.write_row(row,0,list(df_vessels.columns),hdr); row += 1
-            for _,r in df_vessels.iterrows():
-                ws.write(row,0,str(r["Stage"]),box)
-                ws.write_number(row,1,float(r[t("vessel",lang)]),box)
-                ws.write_number(row,2,float(r[t("out_ppm",lang)]),num2)
-                ws.write_number(row,3,float(r[t("rej_pct",lang)]),num2)
-                ws.write_number(row,4,float(r[t("pass_pct",lang)]),num2)
-                row += 1
+            df_all=df_new
+        df_all.to_csv(path, index=False)
+        st.success(f"Saved to {path.name}")
 
-        chart = wb.add_chart({"type":"column"})
-        chart.add_series({
-            "name":"KPIs",
-            "categories":["Report",kpi_start+1,0,kpi_end,0],
-            "values":["Report",kpi_start+1,1,kpi_end,1],
-        })
-        chart.set_title({"name":"Main KPIs"})
-        chart.set_legend({"position":"none"})
-        chart.set_size({"width":520,"height":300})
-        ws.insert_chart(kpi_start,3,chart)
+        # KPI cards (richer)
+        k1,k2,k3,k4 = st.columns(4)
+        k1.metric("Recovery %", f"{row['recovery_pct']:.1f}")
+        k2.metric("Rejection %", f"{(row['rejection_pct'] or 0):.1f}")
+        k3.metric("PQI (0–100)", f"{(row['pqi'] or 0):.0f}")
+        k4.metric("Salt Passage (%)", f"{row['salt_passage_pct']:.2f}")
 
-    st.download_button(
-        t("export_excel",lang),
-        data=excel_buf.getvalue(),
-        file_name=f"{plant_name}_{ts_str}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+        h1,h2,h3,h4 = st.columns(4)
+        h1.metric("Feed Flow (LPM)", f"{row['feed_flow_lpm']:.1f}")
+        h2.metric("Product Flow (LPM)", f"{row['product_flow_lpm']:.1f}")
+        h3.metric("Reject Flow (LPM)", f"{row['reject_flow_lpm']:.1f}")
+        h4.metric("NDP (bar)", f"{row['ndp_bar']:.2f}")
 
-    with st.expander("📄 PDF"):
-        try:
-            from reportlab.lib.pagesizes import A4
-            from reportlab.pdfgen import canvas
-            from reportlab.lib.units import cm
-            from reportlab.lib.colors import Color
+        p1,p2,p3 = st.columns(3)
+        p1.metric("ΔP Cartridge (bar)", f"{(row['cartridge_dp'] or 0):.2f}")
+        p2.metric("ΔP Vessels (bar)", f"{(row['vessel_dp'] or 0):.2f}")
+        p3.metric("HP ΔP (bar)", f"{(row['hp_dp'] or 0):.2f}")
 
-            buf = BytesIO()
-            c = canvas.Canvas(buf, pagesize=A4)
-            w, h = A4
+        e1,e2 = st.columns(2)
+        e1.metric("NPF (LPM)", f"{row['npf_lpm']:.1f}")
+        e2.metric("Specific Energy (kWh/m³)", f"{row['specific_energy_kwh_m3']:.2f}")
 
-            blue = Color(31/255,111/255,235/255)
-            c.setFillColor(blue)
-            c.rect(0, h-1.2*cm, w, 1.2*cm, fill=1, stroke=0)
-            c.setFillColorRGB(1,1,1)
-            c.setFont("Helvetica-Bold", 14)
-            c.drawString(1.5*cm, h-0.8*cm, "LeeWave — RO Run Report")
+        # Maintenance note
+        row["maintenance_note"] = maintenance_note_from_row(row)
+        st.markdown(f"<div class='warn'><b>Daily Note:</b> {row['maintenance_note']}</div>", unsafe_allow_html=True)
+        if row["feed_vs_sum_ok"]:
+            st.markdown("<div class='good'>Flow balance OK (Feed ≈ Product + Reject)</div>", unsafe_allow_html=True)
+        else:
+            st.markdown("<div class='bad'>Flow mismatch: check meters/valves.</div>", unsafe_allow_html=True)
 
-            y = h - 2.2*cm
-            def line(txt, dy=14, bold=False):
-                nonlocal y
-                c.setFont("Helvetica-Bold" if bold else "Helvetica", 11 if bold else 10)
-                c.setFillColorRGB(0,0,0)
-                c.drawString(2*cm, y, str(txt))
-                y -= dy
+        # Per-vessel table
+        if per_vessel_df is not None and not per_vessel_df.empty:
+            st.subheader("Per-Vessel Performance")
+            st.dataframe(per_vessel_df.style.format({"Permeate TDS (ppm)":"{:.1f}","Rejection %":"{:.1f}"}),
+                         use_container_width=True)
+            # Stage summary from averages
+            stage_rows = []
+            for s, avg_tds, stage_rej in stage_avgs:
+                stage_rows.append({"Stage": f"S{s}", "Avg Permeate TDS (ppm)": avg_tds if avg_tds is not None else "",
+                                   "Stage Rejection %": stage_rej if stage_rej is not None else ""})
+            if stage_rows:
+                st.caption("Stage Summary (from per-vessel averages)")
+                st.dataframe(pd.DataFrame(stage_rows), use_container_width=True)
 
-            line(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 12)
-            line(t("inputs",lang), 16, True)
-            for p,v in df_inputs.itertuples(index=False):
-                line(f"{p}: {v}")
+        # Design summary
+        tot_v = int(sum(st.session_state['vessels_per_stage']))
+        tot_m = int(tot_v*st.session_state['membranes_per_vessel'])
+        breakup=" | ".join([f"S{i+1}:{v}" for i,v in enumerate(st.session_state['vessels_per_stage'])])
+        st.info(f"Design: {breakup} • Vessels: {tot_v} • Membranes: {tot_m}")
 
-            line(t("outputs",lang), 16, True)
-            line("Performance: " + (overall_text(evaluate_status(core)[0])))
-            for k in ["Reject Flow (LPM)", t("max_out",lang)+f" (CF≤{cf_limit:.1f})",
-                      t("recovery",lang), t("rejection",lang), t("salt_pass",lang),
-                      t("reject_tds",lang), t("cf",lang), t("mb",lang),
-                      t("dp",lang), t("pi_feed",lang), t("pi_perm",lang), t("dpi",lang), t("ndp",lang), t("prod",lang)]:
-                v = df_outputs[df_outputs["KPI"]==k]["Value"].values
-                if len(v):
-                    vv=v[0]
-                    if isinstance(vv,(int,float)): line(f"{k}: {vv:.3f}")
-                    else: line(f"{k}: {vv}")
+        # ---------- EXCEL EXPORT ----------
+        if XLSX_OK:
+            excel_buf = io.BytesIO()
+            with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
+                wb = writer.book
+                h = wb.add_format({"bold": True, "bg_color": "#F0F4FF", "border": 1})
+                sub = wb.add_format({"italic": True, "font_color": "#666"})
+                badfmt = wb.add_format({"bg_color": "#FFEBEE"})
+                title = wb.add_format({"bold": True, "font_size": 14})
 
-            line(t("notes",lang), 16, True)
-            for n in notes:
-                line("• " + n)
+                ws = wb.add_worksheet("Summary")
+                ws.write("A1", f"{BRAND} — Daily RO Report", title)
+                ws.write("A2", f"Plant {int(st.session_state['plant_capacity'])} m³/d | {row['date']}", sub)
+                ws.write("A3", f"Design: {breakup} • Vessels: {tot_v} • Membranes: {tot_m}", sub)
 
-            c.showPage(); c.save()
-            st.download_button(
-                t("export_pdf",lang),
-                data=buf.getvalue(),
-                file_name=f"{plant_name}_{ts_str}.pdf",
-                mime="application/pdf"
-            )
-        except ImportError:
-            st.warning("Install once:  pip install reportlab")
+                inputs = [
+                    ["Feed TDS (ppm)", row.get("feed_tds", 0)],
+                    ["Product TDS (ppm)", row.get("product_tds", 0)],
+                    ["Feed P IN (bar)", row.get("feed_p_in", 0)],
+                    ["Feed P OUT (bar)", row.get("feed_p_out", 0)],
+                    ["Cartridge P (bar)", row.get("cartridge_p", 0)],
+                    ["HP IN (bar)", row.get("hp_in", 0)],
+                    ["HP OUT (bar)", row.get("hp_out", 0)],
+                    ["Feed Flow (LPM)", row.get("feed_flow_lpm", 0)],
+                    ["Product Flow (LPM)", row.get("product_flow_lpm", 0)],
+                    ["Reject Flow (LPM) (calc)", row.get("reject_flow_lpm", 0)],
+                    ["Water Temp (°C)", row.get("temp_c", 0)],
+                    ["pH", row.get("ph", 0)],
+                    ["SDI", row.get("sdi", 0)],
+                ]
+                ws.add_table(4,0,4+len(inputs),1,{"data":inputs,"columns":[{"header":"Field"},{"header":"Value"}],"style":"Table Style Light 9"})
 
-# =================== History / Admin / Help ===================
-def history_page():
-    lang = st.session_state.lang
-    user = st.session_state.user
-    topbar()
-    st.header(t("history",lang))
+                out = [
+                    ["Recovery %", row.get("recovery_pct", 0)],
+                    ["Rejection %", row.get("rejection_pct", 0) or 0.0],
+                    ["Salt Passage %", row.get("salt_passage_pct", 0)],
+                    ["ΔP Cartridge (bar)", row.get("cartridge_dp", 0) or 0.0],
+                    ["ΔP Vessels (bar)", row.get("vessel_dp", 0) or 0.0],
+                    ["HP ΔP (bar)", row.get("hp_dp", 0) or 0.0],
+                    ["NDP (bar)", row.get("ndp_bar", 0)],
+                    ["NPF (LPM)", row.get("npf_lpm", 0)],
+                    ["PQI (0–100)", row.get("pqi", 0) or 0.0],
+                    ["Specific Energy (kWh/m³)", row.get("specific_energy_kwh_m3", 0)],
+                    ["Energy Today (kWh)", row.get("daily_kwh", 0)],
+                    ["Flow Balance OK", "Yes" if row.get("feed_vs_sum_ok") else "No"],
+                ]
+                ws.add_table(4,4,4+len(out),5,{"data":out,"columns":[{"header":"Metric"},{"header":"Value"}],"style":"Table Style Light 9"})
+                ws.write("A20","Maintenance Note", h); ws.write("A21", row.get("maintenance_note",""))
 
-    con=_connect()
-    if user["role"]=="admin":
-        df = pd.read_sql_query("SELECT * FROM runs ORDER BY ts DESC LIMIT 1000", con)
+                # Stage summary sheet (from averages)
+                stage_rows_x = []
+                for s, avg_tds, stage_rej in stage_avgs:
+                    stage_rows_x.append({"Stage": f"S{s}",
+                                         "Avg Permeate TDS (ppm)": avg_tds if avg_tds is not None else "",
+                                         "Stage Rejection %": stage_rej if stage_rej is not None else ""})
+                pd.DataFrame(stage_rows_x).to_excel(writer, index=False, sheet_name="Stage_Summary")
+                writer.sheets["Stage_Summary"].set_column(0, 2, 22)
+
+                # Per-vessel sheet (conditional formatting for low rejection)
+                pv_df_out = per_vessel_df if (per_vessel_df is not None and not per_vessel_df.empty) \
+                    else pd.DataFrame(columns=["Stage","Vessel","Permeate TDS (ppm)","Rejection %"])
+                pv_df_out.to_excel(writer, index=False, sheet_name="Per_Vessel")
+                ws2 = writer.sheets["Per_Vessel"]; ws2.set_column(0, len(pv_df_out.columns)-1, 20)
+                if not pv_df_out.empty and "Rejection %" in pv_df_out.columns:
+                    rej_idx = list(pv_df_out.columns).index("Rejection %")
+                    ws2.conditional_format(1, rej_idx, len(pv_df_out)+1, rej_idx,
+                                           {"type":"cell","criteria":"<","value":60,"format":badfmt})
+
+                # Recent 30-day trend
+                recent = df_all.tail(30).copy()
+                if not recent.empty:
+                    recent["date"]=pd.to_datetime(recent["date"])
+                    cols = ["date","feed_tds","product_tds","recovery_pct","rejection_pct","cartridge_dp","vessel_dp"]
+                    existing = [c for c in cols if c in recent.columns]
+                    recent = recent[existing]
+                    recent.to_excel(writer, index=False, sheet_name="Recent_30d")
+                    ws3 = writer.sheets["Recent_30d"]; ws3.set_column(0, 0, 12); ws3.set_column(1, len(existing)-1, 16)
+                    if {"feed_tds","product_tds"}.issubset(set(existing)):
+                        ch = wb.add_chart({"type":"line"})
+                        ch.add_series({"name":"Feed TDS","categories":["Recent_30d",1,0,len(recent),0],"values":["Recent_30d",1,1,len(recent),1]})
+                        ch.add_series({"name":"Product TDS","categories":["Recent_30d",1,0,len(recent),0],"values":["Recent_30d",1,2,len(recent),2]})
+                        ch.set_title({"name":"TDS Trend (last 30 days)"}); ch.set_x_axis({"name":"Date"}); ch.set_y_axis({"name":"ppm"})
+                        ws3.insert_chart("H3", ch, {"x_scale":1.2,"y_scale":1.0})
+
+            fn_x=f"daily_{int(st.session_state['plant_capacity'])}m3d_{int(st.session_state['num_stages'])}stages_{row['date']}.xlsx"
+            st.download_button("Download Daily Excel", excel_buf.getvalue(), file_name=fn_x,
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            (user_reports_dir(st.session_state.user_email,"daily")/fn_x).write_bytes(excel_buf.getvalue())
+
+        # ---------- PDF EXPORT ----------
+        if REPORTLAB_OK:
+            pdf=io.BytesIO()
+            doc=SimpleDocTemplate(pdf, pagesize=A4, leftMargin=24, rightMargin=24, topMargin=28, bottomMargin=28)
+            styles=getSampleStyleSheet(); title_s=styles["Title"]; normal=styles["Normal"]
+            elements=[]
+            elements.append(Paragraph(f"<b>{BRAND} — Daily RO Report</b>", title_s))
+            elements.append(Paragraph(f"Plant: {int(st.session_state['plant_capacity'])} m³/day • Date: {row['date']}", normal))
+            elements.append(Paragraph(f"Design: {breakup} • Vessels: {tot_v} • Membranes: {tot_m}", normal))
+            elements.append(Spacer(1,8))
+
+            inputs_tbl=[["Field","Value"],
+                        ["Feed TDS (ppm)", f"{row.get('feed_tds',0):.0f}"],["Product TDS (ppm)", f"{row.get('product_tds',0):.0f}"],
+                        ["Feed P IN (bar)", f"{row.get('feed_p_in',0):.2f}"],["Feed P OUT (bar)", f"{row.get('feed_p_out',0):.2f}"],
+                        ["Cartridge P (bar)", f"{row.get('cartridge_p',0):.2f}"],
+                        ["HP IN (bar)", f"{row.get('hp_in',0):.2f}"],["HP OUT (bar)", f"{row.get('hp_out',0):.2f}"],
+                        ["Feed Flow (LPM)", f"{row.get('feed_flow_lpm',0):.1f}"],["Product Flow (LPM)", f"{row.get('product_flow_lpm',0):.1f}"],
+                        ["Reject Flow (LPM) (calc)", f"{row.get('reject_flow_lpm',0):.1f}"],
+                        ["Water Temp (°C)", f"{row.get('temp_c',0):.1f}"],["pH", f"{row.get('ph',0):.1f}"],["SDI", f"{row.get('sdi',0):.1f}"]]
+            t_in=Table(inputs_tbl, colWidths=[180, 120])
+            t_in.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0), colors.HexColor("#EEF4FF")),
+                                      ('BOX',(0,0),(-1,-1),0.6,colors.black),('INNERGRID',(0,0),(-1,-1),0.25,colors.grey),
+                                      ('ALIGN',(0,0),(-1,-1),'CENTER')]))
+            elements.append(Paragraph("<b>Inputs</b>", normal)); elements.append(t_in); elements.append(Spacer(1,8))
+
+            out_tbl=[["Metric","Value","Metric","Value"],
+                     ["Recovery %", f"{row.get('recovery_pct',0):.1f}", "Rejection %", f"{(row.get('rejection_pct') or 0):.1f}"],
+                     ["Salt Passage %", f"{row.get('salt_passage_pct',0):.2f}", "PQI (0–100)", f"{(row.get('pqi') or 0):.0f}"],
+                     ["ΔP Cartridge (bar)", f"{(row.get('cartridge_dp') or 0):.2f}", "ΔP Vessels (bar)", f"{(row.get('vessel_dp') or 0):.2f}"],
+                     ["HP ΔP (bar)", f"{(row.get('hp_dp') or 0):.2f}", "NDP (bar)", f"{row.get('ndp_bar',0):.2f}"],
+                     ["NPF (LPM)", f"{row.get('npf_lpm',0):.1f}", "Specific Energy (kWh/m³)", f"{row.get('specific_energy_kwh_m3',0):.2f}"],
+                     ["Energy Today (kWh)", f"{row.get('daily_kwh',0):.0f}", "Flow Balance OK", "Yes" if row.get("feed_vs_sum_ok") else "No"]]
+            t_out=Table(out_tbl, colWidths=[150,80,150,80])
+            t_out.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0), colors.HexColor("#EEF4FF")),
+                                       ('BOX',(0,0),(-1,-1),0.6,colors.black),('INNERGRID',(0,0),(-1,-1),0.25,colors.grey),
+                                       ('ALIGN',(0,0),(-1,-1),'CENTER')]))
+            elements.append(Paragraph("<b>Outputs / KPIs</b>", normal)); elements.append(t_out); elements.append(Spacer(1,8))
+
+            # Stage snapshot (from averages) + compact per-vessel
+            tbl=[["Stage","Avg Permeate TDS (ppm)","Stage Rej %","", "", "", ""]]
+            for s, avg_tds, stage_rej in stage_avgs:
+                tbl.append([f"S{s}", f"{(avg_tds if avg_tds is not None else 0):.1f}", f"{(stage_rej or 0):.1f}","","","",""])
+            if per_vessel_df is not None and not per_vessel_df.empty:
+                tbl.append(["","","","","","",""]); tbl.append(["Vessel","Permeate TDS","Rej %","Vessel","Permeate TDS","Rej %",""])
+                max_print=min(12, len(per_vessel_df))
+                for i in range(0, max_print, 2):
+                    r1=per_vessel_df.iloc[i]
+                    if i+1<max_print:
+                        r2=per_vessel_df.iloc[i+1]
+                        tbl.append([f"V{int(r1['Vessel'])} (S{int(r1['Stage'])})", f"{float(r1['Permeate TDS (ppm)']):.1f}", f"{(r1['Rejection %'] or 0):.1f}",
+                                    f"V{int(r2['Vessel'])} (S{int(r2['Stage'])})", f"{float(r2['Permeate TDS (ppm)']):.1f}", f"{(r2['Rejection %'] or 0):.1f}",""])
+                    else:
+                        tbl.append([f"V{int(r1['Vessel'])} (S{int(r1['Stage'])})", f"{float(r1['Permeate TDS (ppm)']):.1f}", f"{(r1['Rejection %'] or 0):.1f}","","","",""])
+            t_st=Table(tbl, colWidths=[90,80,70,90,80,70,10])
+            t_st.setStyle(TableStyle([('BOX',(0,0),(-1,-1),0.6,colors.black),('INNERGRID',(0,0),(-1,-1),0.25,colors.grey),('ALIGN',(0,0),(-1,-1),'CENTER')]))
+            elements.append(Paragraph("<b>Stage & Vessel Snapshot</b>", normal)); elements.append(t_st); elements.append(Spacer(1,6))
+
+            elements.append(Paragraph(f"<b>Daily Note:</b> {row.get('maintenance_note','')}", normal))
+            doc.build(elements)
+            fn_p=f"daily_{int(st.session_state['plant_capacity'])}m3d_{int(st.session_state['num_stages'])}stages_{row['date']}.pdf"
+            st.download_button("Download Daily PDF", pdf.getvalue(), file_name=fn_p, mime="application/pdf")
+            (user_reports_dir(st.session_state.user_email,"daily")/fn_p).write_bytes(pdf.getvalue())
+
+# ---------- FORECAST HELPERS ----------
+def linear_forecast_next(values: list, horizon_days: int = 30):
+    if len(values)<2: return [values[-1]]*horizon_days if values else [0.0]*horizon_days
+    x=np.arange(len(values)); y=np.array(values, float)
+    try:
+        m,b=np.polyfit(x,y,1); xf=np.arange(len(values), len(values)+horizon_days)
+        return (m*xf+b).tolist()
+    except Exception: return [values[-1]]*horizon_days
+def next_crossing_day(series_future, threshold, above=True):
+    for i,v in enumerate(series_future):
+        if (above and v>threshold) or ((not above) and v<threshold): return i
+    return None
+
+# ---------- WEEKLY ----------
+if st.session_state["page_mode"] == tr("Weekly Report", st.session_state["lang"]):
+    st.markdown("### 📅 Weekly Report")
+    start_date = st.date_input("Select week start date", value=date.today()-timedelta(days=6))
+    path = csv_path_for_current()
+    if not path.exists():
+        st.warning("No daily data found for this plant yet.")
     else:
-        df = pd.read_sql_query("SELECT * FROM runs WHERE user_id=? ORDER BY ts DESC LIMIT 1000", con, params=(user["id"],))
-    con.close()
+        df=pd.read_csv(path); df["date"]=pd.to_datetime(df["date"]).dt.date
+        df_week = df[(df["date"]>=start_date) & (df["date"]<=start_date+timedelta(days=6))].sort_values("date")
+        if df_week.empty:
+            st.warning("No entries found for this week.")
+        else:
+            try:
+                last_conf = df_week.iloc[-1]
+                vps=json.loads(last_conf["vessels_per_stage"]); mpv=int(last_conf.get("membranes_per_vessel",6))
+                tot_v=int(sum(vps)); tot_m=int(tot_v*mpv); brk=" | ".join([f"S{i+1}:{v}" for i,v in enumerate(vps)])
+                st.info(f"Design: {brk} • Vessels: {tot_v} • Membranes: {tot_m}")
+            except Exception: pass
 
-    if df.empty:
-        st.info("No saved runs yet."); 
-        return
+            st.dataframe(df_week, use_container_width=True)
+            def avg(col): return float(df_week[col].dropna().astype(float).mean()) if col in df_week else None
+            c1,c2,c3,c4,c5,c6=st.columns(6)
+            c1.metric("Avg Feed TDS", f"{(avg('feed_tds') or 0):.0f} ppm")
+            c2.metric("Avg Product TDS", f"{(avg('product_tds') or 0):.0f} ppm")
+            c3.metric("Avg Recovery", f"{(avg('recovery_pct') or 0):.1f} %")
+            c4.metric("Avg Rejection", f"{(avg('rejection_pct') or 0):.1f} %")
+            c5.metric("Avg ΔP Cartridge", f"{(avg('cartridge_dp') or 0):.2f} bar")
+            c6.metric("Avg ΔP Vessels", f"{(avg('vessel_dp') or 0):.2f} bar")
 
-    fcol1, fcol2 = st.columns(2)
-    with fcol1: f1 = st.text_input(t("filter_plant",lang), "")
-    with fcol2: f2 = st.text_input(t("filter_site",lang),  "")
-    if f1: df = df[df["plant_name"].astype(str).str.contains(f1, case=False, na=False)]
-    if f2: df = df[df["site_name"].astype(str).str.contains(f2, case=False, na=False)]
+            # Predictions
+            for col,label,thr,above in [
+                ("product_tds","Product TDS (ppm)",DEFAULT_LIMITS["product_tds_max"],True),
+                ("cartridge_dp","Cartridge ΔP (bar)",DEFAULT_LIMITS["cartridge_dp_max"],True),
+                ("vessel_dp","Vessel ΔP (bar)",DEFAULT_LIMITS["vessel_dp_max"],True),
+                ("recovery_pct","Recovery (%)",DEFAULT_LIMITS["recovery_target"]+DEFAULT_LIMITS["recovery_high_margin"],True),
+            ]:
+                if col in df_week and df_week[col].notna().any():
+                    vals=df_week[col].astype(float).tolist(); forecast=linear_forecast_next(vals,30); cross=next_crossing_day(forecast,thr,above)
+                    if cross is None: st.info(f"{label}: Safe for next 30 days.")
+                    else:
+                        due=(date.today()+timedelta(days=cross)).strftime("%Y-%m-%d")
+                        st.warning(f"{label}: Will cross {thr} in ~{cross} days → Due: {due}")
 
-    st.dataframe(df, use_container_width=True, height=420)
-
-    if "ts" in df.columns:
-        ch1, ch2, ch3 = st.columns(3)
-        with ch1:
-            if "recovery" in df.columns:
-                st.line_chart(df.set_index("ts")[["recovery"]], height=180)
-        with ch2:
-            if "dP" in df.columns:
-                st.line_chart(df.set_index("ts")[["dP"]], height=180)
-        with ch3:
-            if "product_tds" in df.columns:
-                st.line_chart(df.set_index("ts")[["product_tds"]], height=180)
-
-    st.download_button(
-        t("export_hist",lang),
-        data=df.to_csv(index=False).encode("utf-8"),
-        file_name="ro_history.csv",
-        mime="text/csv"
-    )
-
-def admin_page():
-    lang = st.session_state.lang
-    user = st.session_state.user
-    topbar()
-    if user["role"]!="admin":
-        st.error(t("admin_only",lang)); 
-        return
-    st.header(t("admin",lang))
-
-    con=_connect(); cur=con.cursor()
-    users_df = pd.read_sql_query("SELECT id, email, role, capacity_limit, created_at FROM users ORDER BY id", con)
-    st.subheader(t("users",lang))
-    st.dataframe(users_df, use_container_width=True)
-
-    st.subheader(t("cap_req",lang))
-    req_df = pd.read_sql_query("""
-        SELECT r.id, u.email, r.user_id, r.requested_capacity, r.status, r.created_at
-        FROM capacity_requests r JOIN users u ON u.id=r.user_id
-        WHERE r.status='pending' ORDER BY r.created_at DESC
-    """, con)
-
-    if req_df.empty:
-        st.info("No pending requests.")
+# ---------- MONTHLY ----------
+if st.session_state["page_mode"] == tr("Monthly Report", st.session_state["lang"]):
+    st.markdown("### 📅 Monthly Report")
+    month_input = st.date_input("Pick any date in the month", value=date.today())
+    month_str = f"{month_input.year}-{str(month_input.month).zfill(2)}"
+    path = csv_path_for_current()
+    if not path.exists():
+        st.warning("No daily data found for this plant yet.")
     else:
-        st.dataframe(req_df, use_container_width=True)
-        rid = st.number_input("Request ID", min_value=1, step=1)
-        c1,c2 = st.columns(2)
-        with c1:
-            if st.button("Approve"):
-                cur.execute("SELECT user_id, requested_capacity FROM capacity_requests WHERE id=?", (int(rid),))
-                row=cur.fetchone()
-                if row:
-                    uid,new_lim=row
-                    cur.execute("UPDATE users SET capacity_limit=? WHERE id=?", (int(new_lim), int(uid)))
-                    cur.execute("UPDATE capacity_requests SET status='approved' WHERE id=?", (int(rid),))
-                    con.commit()
-                    st.success(f"Approved. User {uid} → limit {new_lim}")
-                    st.rerun()
-                else:
-                    st.error("Invalid request ID.")
-        with c2:
-            if st.button("Deny"):
-                cur.execute("UPDATE capacity_requests SET status='denied' WHERE id=?", (int(rid),))
-                con.commit()
-                st.warning("Denied.")
-                st.rerun()
-    con.close()
+        df=pd.read_csv(path); df["date"]=pd.to_datetime(df["date"]).dt.date
+        df_month = df[(df["date"].apply(lambda d: d.strftime("%Y-%m"))==month_str)].sort_values("date")
+        if df_month.empty:
+            st.warning(f"No entries found for {month_str}.")
+        else:
+            try:
+                last_conf=df_month.iloc[-1]
+                vps=json.loads(last_conf["vessels_per_stage"]); mpv=int(last_conf.get("membranes_per_vessel",6))
+                tot_v=int(sum(vps)); tot_m=int(tot_v*mpv); brk=" | ".join([f"S{i+1}:{v}" for i,v in enumerate(vps)])
+                st.info(f"Design: {brk} • Vessels: {tot_v} • Membranes: {tot_m}")
+            except Exception: pass
+            st.dataframe(df_month, use_container_width=True)
+            st.caption(f"Monthly energy ≈ {float(df_month.get('daily_kwh', pd.Series([]))).sum():.0f} kWh")
+            # simple health score
+            score=100
+            if "product_tds" in df_month: score -= min(15, 3*len(df_month[df_month["product_tds"]>DEFAULT_LIMITS["product_tds_max"]]))
+            if "rejection_pct" in df_month: score -= min(15, 2*len(df_month[df_month["rejection_pct"]<DEFAULT_LIMITS["rejection_min"]]))
+            score=max(0,min(100,score))
+            st.metric("Health Score", f"{score}/100")
 
-def help_page():
-    lang = st.session_state.lang
-    topbar()
-    st.header(t("help",lang))
-    st.markdown(f"""
-*How to use (Pro workflow)*
-1) Enter all inputs in the top form (Plant Info, Quality, Flows, Pressures, Vessels).
-2) Click *{t('calc',lang)}* — results and diagnosis will appear.
-3) Review *KPIs, **Overall Plant Status, **Notes, **Max Safe Output*.
-4) Save to *History, or export **Excel/PDF* for sharing.
-5) If you hit the 5-capacity limit, click *{t('req_more',lang)}* from the banner to request more.
-""")
+# ---------- HISTORY & EXPORTS ----------
+if st.session_state["page_mode"] == tr("History & Exports", st.session_state["lang"]):
+    st.markdown("### 📚 History & Exports")
+    path = csv_path_for_current()
+    if not path.exists(): st.info("No history yet for this plant.")
+    else:
+        df = pd.read_csv(path); df["date"]=pd.to_datetime(df["date"]).dt.date
+        c1,c2,c3 = st.columns(3)
+        date_from = c1.date_input("From", value=df["date"].min())
+        date_to   = c2.date_input("To",   value=df["date"].max())
+        tds_thr   = c3.number_input("Show Product TDS > (ppm)", 0.0, 1e6, 0.0, 1.0)
+        mask = (df["date"]>=date_from) & (df["date"]<=date_to)
+        if tds_thr>0: mask &= (df["product_tds"]>tds_thr)
+        out = df[mask].sort_values("date")
+        st.dataframe(out, use_container_width=True); st.caption(f"{len(out)} rows")
+        if XLSX_OK and not out.empty:
+            excel_buf=io.BytesIO()
+            with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
+                out.to_excel(writer, index=False, sheet_name="Filtered")
+            st.download_button("Download Filtered Excel", excel_buf.getvalue(), file_name=f"history_{date_from}to{date_to}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-# -------------------- Router --------------------
-if st.session_state.user is None or st.session_state.page == "auth":
-    auth_page()
-else:
-    if   st.session_state.page == "app":      app_page()
-    elif st.session_state.page == "history":  history_page()
-    elif st.session_state.page == "admin":    admin_page()
-    elif st.session_state.page == "help":     help_page()
-    else:                                     app_page()
+# ---------- RO DESIGN ----------
+if st.session_state["page_mode"] == tr("RO Design", st.session_state["lang"]):
+    st.markdown("### 🧮 RO Design — Quick Sizing")
+    cap_m3d = st.number_input("Target Capacity (m³/day)", 10, 50000, int(st.session_state["plant_capacity"]), 10)
+    recovery_target = st.slider("Target Recovery (%)", 40, 85, int(st.session_state["design_rec"]))
+    prod_m3h = cap_m3d/24.0; per_elem_m3h = 1.2
+    need_elements = int(np.ceil(prod_m3h / per_elem_m3h))
+    per_vessel_elems = st.number_input('Membranes per vessel (8")', 1, 8, int(st.session_state["membranes_per_vessel"]), 1)
+    need_vessels = int(np.ceil(need_elements / per_vessel_elems))
+    stages = st.slider("Stages", 1, 6, int(st.session_state["num_stages"]))
+    split=[]; rem=need_vessels
+    for i in range(stages):
+        v=int(np.ceil(rem/(stages-i))); split.append(v); rem-=v
+    st.write(f"Suggested vessels per stage: {split} (total vessels: {sum(split)}, total membranes: {sum(split)*per_vessel_elems})")
+    st.caption("Quick estimate — refine with feed TDS, temperature, and design constraints.")
