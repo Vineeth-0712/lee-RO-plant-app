@@ -1,6 +1,7 @@
 streamlit
 pandas
-xlsxwriter
+numpy
+itsdangerous
+bcrypt
 reportlab
-sqlalchemy
-psycopg2-binary
+xlsxwriter
